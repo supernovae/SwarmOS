@@ -51,14 +51,16 @@ var (
 )
 
 type WorkOptions struct {
-	IssueContinuation bool
-	RequestedPhase    string
-	PlanCheckpoint    bool
-	ExpectedHead      string
-	CandidateHead     string
-	Version           string
-	ReviewEvidence    tracker.ReviewEvidence
-	CIEvidence        []tracker.CheckEvidence // ephemeral coordinator input, never an authoritative artifact
+	CompareRoleRouting bool
+	OnRoleRoutingDrift func(*RoleRoutingComparison)
+	IssueContinuation  bool
+	RequestedPhase     string
+	PlanCheckpoint     bool
+	ExpectedHead       string
+	CandidateHead      string
+	Version            string
+	ReviewEvidence     tracker.ReviewEvidence
+	CIEvidence         []tracker.CheckEvidence // ephemeral coordinator input, never an authoritative artifact
 
 	InspectionTime        time.Time // read-only preview clock; zero uses wall clock
 	InspectOnly           bool      // report execution blockers without claiming or running work
@@ -162,30 +164,34 @@ func LeadRole(phase string) string {
 
 // PreflightResult is the immutable execution selection made before a claim.
 type PreflightResult struct {
-	RolePolicy       string               `json:"role_policy,omitempty"`
-	RolePreview      []RolePreview        `json:"role_preview,omitempty"`
-	Continuation     *ContinuationPreview `json:"continuation,omitempty"`
-	ToolCapabilities map[string]sandbox.ToolCapabilityReport
-	BrowserProfile   string
-	Execution        contract.ExecutionConfig
-	Blockers         []string
-	Issue            *tracker.Issue
-	WorkUnit         *contract.WorkUnit
-	Workflow         *contract.WorkflowSpec
-	Config           *contract.SwarmConfig
-	BaseSHA          string
-	Gate             contract.GateMode
-	Agents           map[string]string
-	Binaries         map[string]string
-	Validation       *contract.ValidationSpec
-	TaskDigest       string
-	PolicyDigest     string
-	Phase            string
+	RoleRoutingComparison *RoleRoutingComparison `json:"role_routing_comparison,omitempty"`
+	RolePolicy            string                 `json:"role_policy,omitempty"`
+	RolePreview           []RolePreview          `json:"role_preview,omitempty"`
+	Continuation          *ContinuationPreview   `json:"continuation,omitempty"`
+	ToolCapabilities      map[string]sandbox.ToolCapabilityReport
+	BrowserProfile        string
+	Execution             contract.ExecutionConfig
+	Blockers              []string
+	Issue                 *tracker.Issue
+	WorkUnit              *contract.WorkUnit
+	Workflow              *contract.WorkflowSpec
+	Config                *contract.SwarmConfig
+	BaseSHA               string
+	Gate                  contract.GateMode
+	Agents                map[string]string
+	Binaries              map[string]string
+	Validation            *contract.ValidationSpec
+	TaskDigest            string
+	PolicyDigest          string
+	Phase                 string
 	// Dependencies are the agent dependency caches prefetched for BaseSHA.
 	Dependencies sandbox.Dependencies
 }
 
+type AgentInspector func(string, *contract.SwarmConfig, bool, string, agent.RunnerOptions, string) (string, sandbox.ToolCapabilityReport, error)
+
 type Engine struct {
+	inspectAgent           AgentInspector
 	InspectCapabilityEntry func(string) error
 	progressTicks          <-chan time.Time
 	progressNow            func() time.Time
@@ -207,6 +213,7 @@ type Engine struct {
 // construction. Zero values keep the process environment and the default node
 // profile path.
 type EngineOptions struct {
+	InspectAgent           AgentInspector
 	InspectCapabilityEntry func(string) error
 	NewRunner              func(string, *contract.SwarmConfig, bool) (agent.Runner, error)
 	LookupEnv              func(string) (string, bool)
@@ -257,7 +264,7 @@ func NewEngineWithOptions(repoRoot string, tr tracker.Tracker, opts EngineOption
 	// A malformed profile keeps the default per-repository caches and
 	// allows no private modules.
 	policy := node.DependencyPolicy(opts.NodeProfilePath, opts.RegistryPath, repoRoot)
-	return &Engine{Tracker: tr, LeaseManager: mgr, Config: cfg, repoRoot: repoRoot, InspectCapabilityEntry: opts.InspectCapabilityEntry, LookupEnv: opts.LookupEnv, NewRunner: opts.NewRunner, DependencyPolicy: policy}, nil
+	return &Engine{inspectAgent: opts.InspectAgent, Tracker: tr, LeaseManager: mgr, Config: cfg, repoRoot: repoRoot, InspectCapabilityEntry: opts.InspectCapabilityEntry, LookupEnv: opts.LookupEnv, NewRunner: opts.NewRunner, DependencyPolicy: policy}, nil
 }
 
 func NewEngineWithManager(repoRoot string, tr tracker.Tracker, mgr *lease.Manager, cfg *contract.SwarmConfig, forkMode bool, forkRemote string) *Engine {
@@ -269,6 +276,7 @@ func NewEngineWithManagerOptions(repoRoot string, tr tracker.Tracker, mgr *lease
 		mgr.SetNodeProfile(prof)
 	}
 	return &Engine{
+		inspectAgent:           opts.InspectAgent,
 		DependencyPolicy:       node.DependencyPolicy(opts.NodeProfilePath, opts.RegistryPath, repoRoot),
 		Tracker:                tr,
 		LeaseManager:           mgr,
@@ -482,6 +490,10 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 			return nil, err
 		}
 	}
+	inspectAgent := e.inspectAgent
+	if inspectAgent == nil {
+		inspectAgent = agent.InspectWithOptions
+	}
 	agents := make(map[string]string, 4)
 	binaries := make(map[string]string, 4)
 	capabilities := make(map[string]sandbox.ToolCapabilityReport, 4)
@@ -528,7 +540,7 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 					blockers = append(blockers, err.Error())
 				}
 			}
-			resolved, report, err := agent.InspectWithOptions(name, cfg, e.Tracker.BackendName() == "local", role, e.runnerOptions(ctx), "approved_task")
+			resolved, report, err := inspectAgent(name, cfg, e.Tracker.BackendName() == "local", role, e.runnerOptions(ctx), "approved_task")
 			capabilities[role] = report
 			if err != nil {
 				if !opts.InspectOnly {
@@ -629,8 +641,10 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 			rolePreview = append(rolePreview, row)
 		}
 	}
-	return &PreflightResult{RolePolicy: rolePolicy, RolePreview: rolePreview, Continuation: continuation, ToolCapabilities: capabilities, BrowserProfile: browserProfile, Execution: execution, Blockers: blockers, Issue: iss, WorkUnit: wu, Workflow: wf, Config: cfg, BaseSHA: state.BaseSHA, Gate: gate, Agents: agents,
-		Binaries: binaries, Validation: checks, TaskDigest: state.TaskDigest, PolicyDigest: state.PolicyDigest, Phase: opts.Phase, Dependencies: deps}, nil
+	result := &PreflightResult{RolePolicy: rolePolicy, RolePreview: rolePreview, Continuation: continuation, ToolCapabilities: capabilities, BrowserProfile: browserProfile, Execution: execution, Blockers: blockers, Issue: iss, WorkUnit: wu, Workflow: wf, Config: cfg, BaseSHA: state.BaseSHA, Gate: gate, Agents: agents,
+		Binaries: binaries, Validation: checks, TaskDigest: state.TaskDigest, PolicyDigest: state.PolicyDigest, Phase: opts.Phase, Dependencies: deps}
+	result.RoleRoutingComparison = e.compareRoleRouting(ctx, opts, result, state)
+	return result, nil
 }
 
 func rolesForPhase(phase string, gate contract.GateMode, hasPlan, approved bool) []string {

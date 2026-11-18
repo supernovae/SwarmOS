@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -139,6 +140,11 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 					return err
 				}
 			}
+			opts.CompareRoleRouting = true
+			opts.OnRoleRoutingDrift = func(comparison *workflow.RoleRoutingComparison) {
+				fmt.Fprint(cmd.ErrOrStderr(), "Warning: ")
+				writeRoleRoutingComparison(cmd.ErrOrStderr(), comparison)
+			}
 			stops.number = opts.IssueNumber
 			engine := workflow.NewEngineWithManagerOptions(opts.RepoRoot, tr, mgr, cfg, rootOpts.Fork, rootOpts.effectiveForkRemote(), rootOpts.engineOptions())
 			if !dryRun {
@@ -188,6 +194,9 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 						if report, ok := preflight.ToolCapabilities[role]; ok {
 							fmt.Fprint(cmd.OutOrStdout(), sandbox.FormatToolCapabilities(report))
 						}
+					}
+					if comparison := preflight.RoleRoutingComparison; comparison != nil {
+						writeRoleRoutingComparison(cmd.OutOrStdout(), comparison)
 					}
 					for _, blocker := range preflight.Blockers {
 						fmt.Fprintln(cmd.OutOrStdout(), "Blocker: "+blocker)
@@ -317,4 +326,16 @@ func formatRoleSelection(row workflow.RolePreview) string {
 		effort = "harness default"
 	}
 	return fmt.Sprintf("entry=%s, source=%s, harness=%s, model=%s, effort=%s", row.Entry, row.Source, harness, model, effort)
+}
+
+func writeRoleRoutingComparison(out io.Writer, comparison *workflow.RoleRoutingComparison) {
+	if comparison.Unavailable {
+		fmt.Fprintf(out, "Role routing comparison unavailable (approval %s): %s\n", comparison.ApprovedSHA, comparison.Reason)
+		return
+	}
+	fmt.Fprintf(out, "Role routing drift on %s (approval %s, target %s): %s\n", comparison.Branch, comparison.ApprovedSHA, comparison.TargetSHA, comparison.Reason)
+	for _, change := range comparison.Changes {
+		fmt.Fprintf(out, "  %s: approved (%s), target (%s)\n", change.Approved.Role, formatRoleSelection(change.Approved), formatRoleSelection(change.Target))
+	}
+	fmt.Fprintln(out, comparison.Guidance)
 }

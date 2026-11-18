@@ -29,6 +29,7 @@ import (
 )
 
 type RootOptions struct {
+	inspectAgent           workflow.AgentInspector
 	inspectCapabilityEntry func(string) error
 	maintenanceHook        func(*cobra.Command, bool)
 	progressReporter       func(context.Context, func(workflow.ProgressEvent)) *workflow.ProgressReporter

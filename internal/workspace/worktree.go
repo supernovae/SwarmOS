@@ -1535,6 +1535,41 @@ func RebindBudgetCheckpoint(ctx context.Context, root string, issue int, oldBran
 	return verifyWorktree(path, newBranch, head)
 }
 
+// ResolveTrustedTargetBranch resolves the recorded target or advertised default
+// using only the configured remote, even when matching local refs exist.
+func ResolveTrustedTargetBranch(ctx context.Context, root, remote, branch string) (string, string, error) {
+	remote = UpstreamRemoteOrDefault(remote)
+	if err := ValidateRemoteName(remote); err != nil {
+		return branch, "", err
+	}
+	if _, err := gitOutputContext(ctx, root, "remote", "get-url", remote); err != nil {
+		return branch, "", err
+	}
+	if branch == "" {
+		// Read the advertised name directly so a stale remote-tracking HEAD
+		// or a narrow fetch refspec cannot determine the target.
+		out, err := gitOutputContext(ctx, root, "ls-remote", "--symref", remote, "HEAD")
+		if err != nil {
+			return "", "", err
+		}
+		for line := range strings.Lines(out) {
+			ref, ok := strings.CutSuffix(strings.TrimSpace(line), "\tHEAD")
+			if name, found := strings.CutPrefix(ref, "ref: refs/heads/"); ok && found {
+				branch = name
+				break
+			}
+		}
+		if branch == "" {
+			return "", "", fmt.Errorf("%s has no advertised default branch", remote)
+		}
+	}
+	if err := contract.ValidateBaseBranch(branch); err != nil {
+		return branch, "", err
+	}
+	sha, err := fetchExactBranch(ctx, root, remote, branch)
+	return branch, sha, err
+}
+
 // ResolveBranchFrom fetches only the exact heads ref. A failed fetch never uses cached refs.
 func ResolveBranchFrom(root, remote, branch string) (string, error) {
 	if branch == "" {
@@ -1560,11 +1595,16 @@ func ResolveBranchFrom(root, remote, branch string) (string, error) {
 		}
 		return sha, nil
 	}
+	return fetchExactBranch(context.Background(), root, remote, branch)
+}
+
+func fetchExactBranch(ctx context.Context, root, remote, branch string) (string, error) {
 	dest := "refs/remotes/" + remote + "/" + branch
-	if _, err := gitOutput(root, "fetch", "--no-tags", "--no-write-fetch-head", remote, "+refs/heads/"+branch+":"+dest); err != nil {
+	if _, err := gitOutputContext(ctx, root, "fetch", "--no-tags", "--no-write-fetch-head", remote, "+refs/heads/"+branch+":"+dest); err != nil {
 		return "", fmt.Errorf("fetch base branch %q: %w", branch, err)
 	}
-	return resolveCommit(root, dest)
+	out, err := gitOutputContext(ctx, root, "rev-parse", "--verify", dest+"^{commit}")
+	return strings.TrimSpace(out), err
 }
 
 // BaseBranchName resolves the recorded target or the trusted default name.

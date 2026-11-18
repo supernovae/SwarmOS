@@ -9,13 +9,17 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/workflow"
 	"github.com/supernovae/swarmos/internal/workspace"
@@ -340,4 +344,246 @@ func TestWorkRolePreviewDiagnostics(t *testing.T) {
 		cfg.Agents[tc.name] = entry
 	}
 	checkRolePreviewReadOnly(t, f, issue)
+}
+
+func TestWorkRoleRoutingDrift(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires Linux native routing")
+	}
+	for _, scenario := range []string{"preview_and_launch", "reapprove", "no_drift", "unavailable", "advertised_default"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newCLIFixture(t)
+			issue := f.create(t, "none")
+			cfg := rolePreviewConfig(t, f)
+			cfg.Tracker = "github"
+			cfg.DefaultAgent, cfg.PlanMode, cfg.Roles = "opencode", "agent", nil
+			cfg.Agents["opencode"] = contract.AgentConfig{Binary: "opencode"}
+			if scenario != "advertised_default" {
+				cfg.BaseBranch = "release"
+			}
+			commitRolePreviewConfig(t, f, cfg)
+			remote := filepath.Join(t.TempDir(), "upstream.git")
+			prGit(t, f.root, "init", "--bare", "--initial-branch=trunk", remote)
+			prGit(t, f.root, "remote", "add", "upstream", remote)
+			prGit(t, f.root, "push", "upstream", "HEAD:trunk", "HEAD:release")
+			n := strconv.Itoa(issue)
+			tr := setupGitHubTracker{f.tracker}
+			manager := lease.NewManager(tr, cfg.Security)
+			manager.SetUpstreamRemote("upstream")
+			if err := manager.ConfigureStore(f.root); err != nil {
+				t.Fatal(err)
+			}
+			cmdInspector := func(string, *contract.SwarmConfig, bool, string, agent.RunnerOptions, string) (string, sandbox.ToolCapabilityReport, error) {
+				return "fixture-agent", sandbox.ToolCapabilityReport{}, nil
+			}
+			run := func(args ...string) (string, string, error) {
+				cmd := f.command(&RootOptions{RepoRoot: f.root, UpstreamRemote: "upstream", trackerOverride: tr, inspectAgent: cmdInspector})
+				var out, stderr bytes.Buffer
+				cmd.SetOut(&out)
+				cmd.SetErr(&stderr)
+				cmd.SetArgs(args)
+				err := cmd.Execute()
+				return out.String(), stderr.String(), err
+			}
+			must := func(args ...string) string {
+				t.Helper()
+				out, stderr, err := run(args...)
+				if err != nil {
+					t.Fatalf("%v: %v\n%s\n%s", args, err, out, stderr)
+				}
+				return out
+			}
+			state := func() *lease.IssueState {
+				t.Helper()
+				st, err := manager.GetCurrentState(t.Context(), issue)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return st
+			}
+			must("issue", "approve", n)
+			initial := state()
+			base := initial.BaseSHA
+			branch := "release"
+			if scenario == "advertised_default" {
+				branch = "trunk"
+				if initial.BaseBranch != "" {
+					t.Fatalf("expected no explicit target, got %q", initial.BaseBranch)
+				}
+			}
+			preview := func(format, phase string, extra ...string) string {
+				t.Helper()
+				return must(append([]string{"issue", "work", n, "--dry-run", "--format=" + format, "--phase=" + phase}, extra...)...)
+			}
+			parse := func(phase string, extra ...string) workflow.PreflightResult {
+				t.Helper()
+				var envelope struct {
+					Plan workflow.PreflightResult `json:"effective_plan"`
+				}
+				if err := json.Unmarshal([]byte(preview("json", phase, extra...)), &envelope); err != nil {
+					t.Fatal(err)
+				}
+				return envelope.Plan
+			}
+			wantText := func(text string, pieces ...string) {
+				t.Helper()
+				for _, piece := range pieces {
+					if !strings.Contains(text, piece) {
+						t.Fatalf("missing %q in output:\n%s", piece, text)
+					}
+				}
+			}
+			noDrift := func() {
+				t.Helper()
+				text := preview("text", "plan")
+				wantText(text, "planner: selected (entry=opencode, source=default_agent")
+				if plan := parse("plan"); plan.RoleRoutingComparison != nil || plan.RolePreview[0].Entry != "opencode" || strings.Contains(text, "Role routing") {
+					t.Fatalf("unexpected routing advisory: %+v\n%s", plan.RoleRoutingComparison, text)
+				}
+			}
+			acquire := func() {
+				t.Helper()
+				st, err := manager.Acquire(t.Context(), issue, "alice", "opencode", "plan", time.Hour, cfg.Lease.MaxRenewals)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := lease.SaveClaimToken(f.root, issue, st.Lease.ClaimID, st.BaseSHA); err != nil {
+					t.Fatal(err)
+				}
+			}
+			launch := func(warn bool) {
+				t.Helper()
+				calls := 0
+				var out, stderr bytes.Buffer
+				f.resolverRunner = func(name string, approved *contract.SwarmConfig, local bool) (agent.Runner, error) {
+					calls++
+					if warn {
+						wantText(stderr.String(), "Warning: Role routing drift on "+branch, base, "After any active claim is released, run swarm issue approve "+n)
+					} else if strings.Contains(stderr.String(), "Role routing") {
+						t.Fatalf("unexpected execution warning: %s", &stderr)
+					}
+					if name != "opencode" || approved.DefaultAgent != "opencode" || approved.Roles["planner"] != "" || local {
+						t.Fatalf("runner received %q with config %+v", name, approved.Roles)
+					}
+					return &agent.MockRunner{}, nil
+				}
+				cmd := f.command(&RootOptions{RepoRoot: f.root, UpstreamRemote: "upstream", trackerOverride: tr, inspectAgent: cmdInspector})
+				cmd.SetOut(&out)
+				cmd.SetErr(&stderr)
+				cmd.SetArgs([]string{"issue", "work", n, "--phase=plan", "--headless", "--progress=false", "--json"})
+				if err := cmd.Execute(); err != nil || calls != 1 || !json.Valid(out.Bytes()) {
+					t.Fatalf("planner calls=%d, error=%v\n%s\n%s", calls, err, &out, &stderr)
+				}
+			}
+
+			if scenario == "reapprove" || scenario == "unavailable" || scenario == "preview_and_launch" {
+				acquire()
+			}
+			if scenario == "no_drift" {
+				path := filepath.Join(f.root, ".swarm/config.yaml")
+				original, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cfg.Roles = map[string]string{"planner": "codex-plan"}
+				edited, err := yaml.Marshal(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, edited, 0600); err != nil {
+					t.Fatal(err)
+				}
+				noDrift()
+				if err := os.WriteFile(path, original, 0600); err != nil {
+					t.Fatal(err)
+				}
+				cfg.Roles = map[string]string{"planner": "opencode"}
+			} else {
+				cfg.Roles = map[string]string{"planner": "codex-plan", "developer": "codex-test"}
+			}
+			commitRolePreviewConfig(t, f, cfg)
+			target := prGit(t, f.root, "rev-parse", "HEAD")
+			prGit(t, f.root, "push", "upstream", "HEAD:"+branch)
+
+			switch scenario {
+			case "no_drift":
+				noDrift()
+			case "unavailable":
+				before := state()
+				if _, _, err := workspace.ResolveTrustedTargetBranch(t.Context(), f.root, "upstream", branch); err != nil {
+					t.Fatal(err)
+				}
+				prGit(t, remote, "update-ref", "-d", "refs/heads/"+branch)
+				assertUnavailable := func(reason string) {
+					t.Helper()
+					wantText(preview("text", "plan"), "Role routing comparison unavailable", reason, "planner: selected (entry=opencode")
+					plan := parse("plan")
+					c := plan.RoleRoutingComparison
+					if c == nil || !c.Unavailable || c.Reason != reason || len(plan.Blockers) != 0 || plan.RolePreview[0].Entry != "opencode" {
+						t.Fatalf("incorrect unavailable preview: %+v, blockers=%v", c, plan.Blockers)
+					}
+					after := state()
+					if after.BaseSHA != before.BaseSHA || after.PolicyDigest != before.PolicyDigest || after.Lease.Status != before.Lease.Status || after.Lease.ClaimID != before.Lease.ClaimID {
+						t.Fatal("preview changed approved state or claim")
+					}
+				}
+				assertUnavailable("trusted target branch could not be resolved")
+				prGit(t, f.root, "rm", ".swarm/config.yaml")
+				prGit(t, f.root, "commit", "-m", "remove target config")
+				prGit(t, f.root, "push", "upstream", "HEAD:"+branch)
+				prGit(t, f.root, "restore", "--source="+target, "--", ".swarm/config.yaml")
+				assertUnavailable("trusted target branch config could not be loaded")
+				launch(false)
+			case "reapprove":
+				must("issue", "release", n)
+				must("issue", "approve", n)
+				plan := parse("plan")
+				if plan.BaseSHA != target || plan.RoleRoutingComparison != nil || plan.RolePreview[0].Entry != "codex-plan" || plan.RolePreview[0].Source != "roles.planner" {
+					t.Fatalf("reapproved preview: base=%s, comparison=%+v, planner=%+v", plan.BaseSHA, plan.RoleRoutingComparison, plan.RolePreview[0])
+				}
+			default:
+				guidance := "After any active claim is released, run swarm issue approve " + n
+				text := preview("text", "plan")
+				wantText(text, "Role routing drift on "+branch, base, target, "effective role routing differs",
+					"planner: selected (entry=opencode, source=default_agent", "target (entry=codex-plan, source=roles.planner", guidance)
+				plan := parse("plan")
+				c := plan.RoleRoutingComparison
+				if c == nil || c.Branch != branch || c.ApprovedSHA != base || c.TargetSHA != target ||
+					!strings.Contains(c.Reason, "effective role routing differs") || !strings.Contains(c.Guidance, guidance) ||
+					len(c.Changes) != 1 || plan.RolePreview[0].Entry != "opencode" {
+					t.Fatalf("incorrect plan advisory: %+v", c)
+				}
+				change := c.Changes[0]
+				if change.Approved.Role != "planner" || change.Approved.Entry != "opencode" || change.Approved.Source != "default_agent" ||
+					change.Approved.Harness != "opencode" || change.Target.Entry != "codex-plan" || change.Target.Source != "roles.planner" || change.Target.Harness != "codex" {
+					t.Fatalf("incorrect planner change: %+v", change)
+				}
+				if scenario == "advertised_default" {
+					return
+				}
+				impl := parse("implement").RoleRoutingComparison
+				if impl == nil || len(impl.Changes) != 1 || impl.Changes[0].Approved.Role != "developer" {
+					t.Fatalf("incorrect implementation advisory: %+v", impl)
+				}
+				masked := parse("plan", "--planner-agent=opencode", "--agent=codex-plan")
+				if masked.RoleRoutingComparison != nil || masked.RolePreview[0].Source != "--planner-agent" {
+					t.Fatalf("incorrect override preview: %+v", masked.RolePreview[0])
+				}
+				if after := state(); after.BaseSHA != base || after.PolicyDigest != initial.PolicyDigest || after.Lease.Status != "active" {
+					t.Fatal("preview changed approved state or claim")
+				}
+				launch(true)
+				must("issue", "release", n)
+				f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+					t.Fatal("fresh claim started a runner after policy changed")
+					return nil, nil
+				}
+				_, stderr, err := run("issue", "work", n, "--phase=plan", "--headless", "--progress=false")
+				if err == nil || !strings.Contains(err.Error(), "committed policy tree changed") {
+					t.Fatalf("expected fresh claim refusal, got %v (%s)", err, stderr)
+				}
+				wantText(stderr, "Warning: Role routing drift on "+branch, guidance)
+			}
+		})
+	}
 }

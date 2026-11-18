@@ -340,3 +340,39 @@ func TestResolveDefaultFetchCancellation(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveTrustedTargetBranch(t *testing.T) {
+	t.Parallel()
+	repo, remote := t.TempDir(), t.TempDir()
+	runWorkspaceGit(t, repo, "init", "-b", "trunk")
+	runWorkspaceGit(t, repo, "config", "user.name", "Test")
+	runWorkspaceGit(t, repo, "config", "user.email", "test@example.test")
+	runWorkspaceGit(t, repo, "commit", "--allow-empty", "-m", "base")
+	runWorkspaceGit(t, remote, "init", "--bare", "-b", "trunk")
+	runWorkspaceGit(t, repo, "remote", "add", "upstream", remote)
+	runWorkspaceGit(t, repo, "push", "upstream", "trunk", "trunk:release")
+	base := workspaceGitOutput(t, repo, "rev-parse", "HEAD")
+	for target, want := range map[string]string{"": "trunk", "release": "release"} {
+		branch, sha, err := ResolveTrustedTargetBranch(t.Context(), repo, "upstream", target)
+		if err != nil || branch != want || sha != base {
+			t.Fatalf("target %q resolved to %q %q, error %v", target, branch, sha, err)
+		}
+	}
+	runWorkspaceGit(t, remote, "update-ref", "-d", "refs/heads/release")
+	if cached := workspaceGitOutput(t, repo, "rev-parse", "refs/remotes/upstream/release"); cached != base {
+		t.Fatalf("missing cached release ref: %q", cached)
+	}
+	if _, _, err := ResolveTrustedTargetBranch(t.Context(), repo, "upstream", "release"); err == nil {
+		t.Fatal("resolved deleted target from a cached ref")
+	}
+	for _, target := range []string{"", "trunk"} {
+		if _, _, err := ResolveTrustedTargetBranch(t.Context(), repo, "", target); err == nil {
+			t.Fatalf("resolved %q without origin", target)
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, _, err := ResolveTrustedTargetBranch(ctx, repo, "upstream", "trunk"); err == nil {
+		t.Fatal("resolved target after cancellation")
+	}
+}

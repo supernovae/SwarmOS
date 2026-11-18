@@ -31,6 +31,9 @@ func (r *workRun) preflightRun() error {
 	if err != nil {
 		return err
 	}
+	if comparison := r.pre.RoleRoutingComparison; comparison != nil && !comparison.Unavailable && r.opts.OnRoleRoutingDrift != nil {
+		r.opts.OnRoleRoutingDrift(comparison)
+	}
 	if err := r.e.LeaseManager.VerifyDependencies(r.ctx, r.pre.WorkUnit); err != nil {
 		return err
 	}

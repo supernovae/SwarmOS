@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/workspace"
@@ -167,5 +169,86 @@ func TestDiscardCheckpointFlags(t *testing.T) {
 	}
 	if _, err := f.run("issue", "discard-checkpoint", "1"); err == nil || !strings.Contains(err.Error(), "--expected-head is required") {
 		t.Fatalf("missing expected head: %v", err)
+	}
+}
+
+func TestCLIArchiveCompletion(t *testing.T) {
+	for _, scenario := range []string{"released", "expired", "recorded"} {
+		t.Run(scenario, func(t *testing.T) {
+			recorded := scenario == "recorded"
+			f := newCLIFixture(t)
+			n := f.create(t, "agent")
+			ctx := t.Context()
+			number := strconv.Itoa(n)
+			f.must(t, "issue", "approve", number)
+			f.must(t, "issue", "work", number, "--phase", "plan", "--agent", "mock", "--progress=false")
+			f.must(t, "issue", "review-plan", number, "--agent", "mock", "--progress=false")
+			st := f.state(t, n)
+			f.manager.BindClaim(n, st.Lease.ClaimID)
+			path := workspace.WorktreePath(f.root, n)
+			prGit(t, path, "commit", "--allow-empty", "-m", "candidate")
+			candidate := prGit(t, path, "rev-parse", "HEAD")
+			if err := os.MkdirAll(filepath.Join(path, ".swarm/active"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(path, ".swarm/active/IMPLEMENTATION.md"), []byte("Implemented"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			md := lease.ReviewBindings(st)
+			md["head_sha"] = candidate
+			art := contract.Artifact{Type: contract.ArtifactImplementation, Verdict: "PASS", Body: "Implemented", Metadata: md}
+			if err := f.manager.SaveCheckpointCompletion(ctx, n, "alice", st.BaseSHA, candidate, art); err != nil {
+				t.Fatal(err)
+			}
+			if recorded {
+				if _, err := f.manager.RecordCheckpoint(ctx, n, "alice", st.Branch, candidate); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "expired" {
+				rewriteRecoveryState(t, f, n, func(st *lease.IssueState) {
+					st.Lease.ExpiresAt = time.Now().Add(-time.Hour)
+				})
+				// Claim can record a successor before reporting checkout divergence.
+				// Preserve the original candidate in either case.
+				_, claimErr := f.run("issue", "claim", number, "--agent", "mock")
+				if current := f.state(t, n); current.Lease.ClaimID == st.Lease.ClaimID || prGit(t, path, "rev-parse", "HEAD") != candidate {
+					t.Fatalf("claim did not establish a safe successor: %v", claimErr)
+				}
+			} else {
+				f.must(t, "issue", "release", number)
+				rewriteRecoveryState(t, f, n, func(st *lease.IssueState) {
+					st.ApprovedBy = "another-maintainer"
+				})
+			}
+			doc, err := f.runJSON(t, "issue", "work", number, "--agent", "mock", "--progress=false", "--json")
+			var changed *lease.CompletionInputsChangedError
+			if !errors.As(err, &changed) {
+				t.Fatalf("expected changed inputs from work: %v\n%v", err, doc)
+			}
+			args := []string{"issue", "archive-completion", number, "--expected-receipt", changed.ReceiptID}
+			assertNextAction(t, doc, err, ReasonCompletionInputsChanged, true, ExitFailure, append([]string{"swarm"}, args...)...)
+			out := f.must(t, args...)
+			ref := "refs/swarm/local-completions/issue-" + number + "/" + candidate
+			if !strings.Contains(out, ref) || prGit(t, f.root, "rev-parse", ref) != candidate {
+				t.Fatalf("candidate retention: %s", out)
+			}
+			if strings.Contains(out, "already recorded") != recorded || strings.Contains(out, "--dry-run") == recorded {
+				t.Fatalf("recovery guidance: %s", out)
+			}
+			if _, err := f.run(args...); !errors.Is(err, lease.ErrClaimFence) || !strings.Contains(err.Error(), "no matching pending completion receipt") {
+				t.Fatalf("repeat archive: %v", err)
+			}
+		})
+	}
+	f := newCLIFixture(t)
+	help := f.must(t, "issue", "archive-completion", "--help")
+	for _, want := range []string{"--expected-receipt", "maintainer", "original coordinator checkout"} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("help lacks %q: %s", want, help)
+		}
+	}
+	if _, err := f.run("--fork", "issue", "archive-completion", "1", "--expected-receipt", strings.Repeat("a", 64)); err == nil || !strings.Contains(err.Error(), "direct coordinator checkout") {
+		t.Fatalf("fork archive: %v", err)
 	}
 }

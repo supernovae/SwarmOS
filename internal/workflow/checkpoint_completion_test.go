@@ -161,12 +161,12 @@ func TestCheckpointCompletionFreshEngineResume(t *testing.T) {
 	}
 }
 func TestCheckpointCompletionEarlyRejection(t *testing.T) {
-	for _, name := range []string{"report", "dirty", "candidate", "branch", "receipt", "missing-receipt", "worktree-forgery", "instructions", "recorded-head", "successor"} {
+	for _, name := range []string{"report", "dirty", "candidate", "branch", "receipt", "missing-receipt", "worktree-forgery", "instructions", "recorded-head", "successor", "changed-approval"} {
 		t.Run(name, func(t *testing.T) {
 			e, opts, dev, tester := completionEngineFixture(t, false)
 			path := workspace.WorktreePath(e.repoRoot, opts.IssueNumber)
 			switch name {
-			case "recorded-head", "successor":
+			case "recorded-head", "successor", "changed-approval":
 				store := e.LeaseManager.Store()
 				raw, rev, err := store.Load(t.Context(), opts.IssueNumber)
 				if err != nil {
@@ -178,8 +178,11 @@ func TestCheckpointCompletionEarlyRejection(t *testing.T) {
 				}
 				if name == "recorded-head" {
 					st.HeadSHA = st.BaseSHA
+				} else if name == "changed-approval" {
+					st.ApprovedBy = "another-maintainer"
 				} else {
 					st.Lease.ClaimID = "successor"
+					opts.ClaimID = st.Lease.ClaimID
 				}
 				raw, err = json.Marshal(st)
 				if err != nil {
@@ -222,8 +225,17 @@ func TestCheckpointCompletionEarlyRejection(t *testing.T) {
 			head := completionGit(t, path, "rev-parse", "HEAD")
 			status := completionGit(t, path, "status", "--porcelain")
 			report, _ := os.ReadFile(filepath.Join(path, ".swarm/active/IMPLEMENTATION.md"))
-			if _, err := e.ExecuteWork(t.Context(), opts); err == nil {
+			_, workErr := e.ExecuteWork(t.Context(), opts)
+			if workErr == nil {
 				t.Fatal("recovery accepted changed input")
+			}
+			if name == "changed-approval" || name == "successor" {
+				var changed *lease.CompletionInputsChangedError
+				if !errors.As(workErr, &changed) || !errors.Is(workErr, lease.ErrClaimFence) ||
+					changed.IssueNumber != opts.IssueNumber || changed.Candidate != head || len(changed.ReceiptID) != 64 ||
+					!strings.Contains(workErr.Error(), "--expected-receipt") {
+					t.Fatalf("wanted actionable completion fence: %v", workErr)
+				}
 			}
 			stateAfter, _, err := e.LeaseManager.Store().Load(t.Context(), opts.IssueNumber)
 			if err != nil || string(stateBefore) != string(stateAfter) {

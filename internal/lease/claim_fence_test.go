@@ -62,6 +62,7 @@ var claimFenceInventory = map[string]string{
 	"DecompositionAdmission":         "read-only admission, observation or local binding; no durable state write",
 	"DecompositionParent":            "read-only admission, observation or local binding; no durable state write",
 	"DeleteCleanupBranch":            "cleanup operation token",
+	"ArchiveCheckpointCompletion":    "independent authenticated maintainer archival of superseded completion",
 	"DiscardCheckpoint":              "independent authenticated maintainer discard of inactive checkpoint",
 	"FinishCleanup":                  "cleanup operation token",
 	"GetCurrentState":                "read-only admission, observation or local binding; no durable state write",

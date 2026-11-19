@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/filelock"
@@ -35,7 +36,22 @@ type CheckpointCompletion struct {
 	Bindings                                                   map[string]string
 	Approval                                                   string
 	Artifact                                                   contract.Artifact
+	receiptID                                                  string
 }
+
+// CompletionInputsChangedError identifies the authenticated receipt that needs
+// maintainer attention while preserving the claim-fence error identity.
+type CompletionInputsChangedError struct {
+	IssueNumber int
+	Candidate   string
+	ReceiptID   string
+}
+
+func (e *CompletionInputsChangedError) Error() string {
+	return fmt.Sprintf("completion inputs changed for issue #%d (candidate %s). Inspect issue status and use --expected-receipt %s with archive-completion", e.IssueNumber, e.Candidate, e.ReceiptID)
+}
+func (e *CompletionInputsChangedError) Unwrap() error { return ErrClaimFence }
+
 type completionEnvelope struct {
 	Payload json.RawMessage
 	MAC     string
@@ -193,35 +209,47 @@ func (m *Manager) InspectCheckpointCompletion(ctx context.Context, n int) (resul
 		return nil, err
 	}
 	defer root.Close()
+	c, _, err := readCheckpointCompletion(root, repo, n)
+	return c, err
+}
+
+func readCheckpointCompletion(root *safefs.Root, repo string, n int) (*CheckpointCompletion, []byte, error) {
 	raw, err := root.ReadFile(completionName(n), completionLimit)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read pending completion: %w", err)
+		return nil, nil, fmt.Errorf("read pending completion: %w", err)
 	}
 	key, err := root.ReadFile("key/material", 32)
 	if err != nil || len(key) != 32 {
-		return nil, fmt.Errorf("pending completion authentication unavailable")
+		return nil, nil, fmt.Errorf("pending completion authentication unavailable")
 	}
 	var envelope completionEnvelope
 	if err = strictCompletionJSON(raw, &envelope); err != nil {
-		return nil, fmt.Errorf("invalid completion envelope")
+		return nil, nil, fmt.Errorf("invalid completion envelope")
 	}
 	mac, err := hex.DecodeString(envelope.MAC)
 	want, _ := hex.DecodeString(completionMAC(key, envelope.Payload))
 	if err != nil || !hmac.Equal(mac, want) {
-		return nil, fmt.Errorf("invalid completion authentication")
+		return nil, nil, fmt.Errorf("invalid completion authentication")
 	}
 	var c CheckpointCompletion
 	if err = strictCompletionJSON(envelope.Payload, &c); err != nil || c.Version != 1 || c.Repository != repo || c.Issue != n {
-		return nil, fmt.Errorf("invalid completion identity")
+		return nil, nil, fmt.Errorf("invalid completion identity")
 	}
-	return &c, nil
+	c.receiptID = hash(string(envelope.Payload))
+	return &c, raw, nil
 }
 
 func (m *Manager) checkCompletion(ctx context.Context, st *IssueState, c *CheckpointCompletion) error {
-	if m.gateway != nil || !directIssue(st) || st.Lease.ClaimID != c.Claim || st.Lease.Owner != c.Owner || completionBranch(st) != c.Branch || (!completionPredecessorMatches(st, c) && st.HeadSHA != c.Candidate) || !reflect.DeepEqual(ReviewBindings(st), c.Bindings) || completionApproval(st) != c.Approval {
+	if m.gateway != nil || !directIssue(st) {
+		return ErrClaimFence
+	}
+	if st.Lease.ClaimID != c.Claim || st.Lease.Owner != c.Owner || completionBranch(st) != c.Branch || (!completionPredecessorMatches(st, c) && st.HeadSHA != c.Candidate) || !reflect.DeepEqual(ReviewBindings(st), c.Bindings) || completionApproval(st) != c.Approval {
+		if c.receiptID != "" && isCompletionHex(c.Candidate, 40) {
+			return &CompletionInputsChangedError{IssueNumber: c.Issue, Candidate: c.Candidate, ReceiptID: c.receiptID}
+		}
 		return fmt.Errorf("%w: completion inputs changed", ErrClaimFence)
 	}
 	if err := m.checkStateClaim(ctx, c.Issue, c.Owner, st); err != nil {
@@ -288,15 +316,15 @@ func (m *Manager) RecoverCheckpointCompletion(ctx context.Context, n int, owner 
 	if c == nil {
 		return nil, fmt.Errorf("missing completion receipt")
 	}
-	if c.Owner != owner {
-		return nil, ErrClaimFence
-	}
 	st, _, err := m.load(ctx, n)
 	if err != nil {
 		return nil, err
 	}
 	if err = m.checkCompletion(ctx, st, c); err != nil {
 		return nil, err
+	}
+	if c.Owner != owner {
+		return nil, ErrClaimFence
 	}
 	if completionPredecessorMatches(st, c) {
 		p, err := m.PrepareCheckpoint(ctx, n, owner, c.Predecessor, c.Candidate, false)
@@ -330,7 +358,7 @@ func (m *Manager) RecoverCheckpointCompletion(ctx context.Context, n int, owner 
 		return nil, err
 	}
 	// Removal follows durable trusted state. Failure keeps an idempotent receipt.
-	root, _, err := m.completionRoot(ctx, false)
+	root, repo, err := m.completionRoot(ctx, false)
 	if err != nil {
 		return nil, err
 	}
@@ -344,14 +372,14 @@ func (m *Manager) RecoverCheckpointCompletion(ctx context.Context, n int, owner 
 		return nil, err
 	}
 	defer filelock.Unlock(lock)
-	current, err := m.InspectCheckpointCompletion(ctx, n)
+	current, _, err := readCheckpointCompletion(root, repo, n)
 	if err != nil {
 		return nil, err
 	}
 	if current == nil {
 		return st, nil
 	}
-	if !reflect.DeepEqual(current, c) {
+	if current.receiptID != c.receiptID {
 		return nil, ErrClaimFence
 	}
 	if err = root.Remove(completionName(n)); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -365,10 +393,142 @@ func (m *Manager) completionEligibility(ctx context.Context, st *IssueState, c *
 	if err != nil {
 		return err
 	}
-	if !reflect.DeepEqual(current, c) {
+	if current == nil || current.receiptID != c.receiptID {
 		return ErrClaimFence
 	}
 	return m.checkCompletion(ctx, st, c)
+}
+
+// ArchivedCheckpointCompletion describes local retention of a superseded receipt.
+type ArchivedCheckpointCompletion struct {
+	Candidate       string
+	RetentionRef    string
+	AlreadyRecorded bool
+}
+
+// ArchiveCheckpointCompletion retires an exact pending receipt without using
+// its implementation evidence or changing authoritative issue state.
+func (m *Manager) ArchiveCheckpointCompletion(ctx context.Context, n int, expectedReceipt string) (result *ArchivedCheckpointCompletion, resultErr error) {
+	defer func() { resultErr = completionPublicError(resultErr) }()
+	if m.gateway != nil {
+		return nil, fmt.Errorf("completion archival requires the original direct coordinator checkout")
+	}
+	actor, err := m.tracker.CurrentUser(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(actor) == "" {
+		return nil, fmt.Errorf("completion archival requires an authenticated maintainer")
+	}
+	if err = m.tracker.Authorize(ctx, "approve-task"); err != nil {
+		return nil, err
+	}
+	if !isCompletionHex(expectedReceipt, 64) {
+		return nil, fmt.Errorf("--expected-receipt must be the full SHA-256 selector from the completion diagnostic")
+	}
+	noMatch := fmt.Errorf("%w: no matching pending completion receipt for issue #%d in this checkout", ErrClaimFence, n)
+	root, repo, err := m.completionRoot(ctx, false)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, noMatch
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	// Observe the selected receipt before loading state so an older snapshot
+	// cannot make a receipt created by a newer claim look superseded.
+	observed, _, err := readCheckpointCompletion(root, repo, n)
+	if err != nil {
+		return nil, err
+	}
+	if observed == nil || observed.receiptID != expectedReceipt {
+		return nil, noMatch
+	}
+	// Never take the state-store lock while holding the private storage lock.
+	// A terminal or superseded claim ID cannot become active again.
+	st, _, err := m.loadReadOnly(ctx, n)
+	if err != nil {
+		return nil, err
+	}
+	if !directIssue(st) || st.PRURL != "" || st.PROutcome != nil || st.SubmittedHeadSHA != "" || st.Cleanup != nil {
+		return nil, fmt.Errorf("%w: completion archival requires a direct issue without a pull request or cleanup reservation", ErrClaimFence)
+	}
+	lock, err := root.OpenLock("storage.lock")
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Close()
+	if err = filelock.LockExclusive(lock); err != nil {
+		return nil, err
+	}
+	defer filelock.Unlock(lock)
+	c, raw, err := readCheckpointCompletion(root, repo, n)
+	if err != nil {
+		return nil, err
+	}
+	if c == nil || c.receiptID != expectedReceipt {
+		return nil, noMatch
+	}
+	switch {
+	case c.Claim == "" || st.Lease.ClaimID == "":
+		return nil, fmt.Errorf("%w: establish a successor claim before archiving", ErrClaimFence)
+	case st.Lease.ClaimID != c.Claim, st.Lease.Status == "released", st.Lease.Status == "revoked":
+	case !st.Lease.ExpiresAt.After(m.nowFn()):
+		return nil, fmt.Errorf("%w: establish a successor claim with swarm issue claim %d before archiving the expired claim's receipt", ErrClaimFence, n)
+	default:
+		return nil, fmt.Errorf("%w: ask the claim owner to run swarm issue release %d or have a maintainer revoke the claim where supported, then archive the receipt", ErrClaimFence, n)
+	}
+	if !isCompletionHex(c.Candidate, 40) {
+		return nil, fmt.Errorf("pending completion does not identify a full candidate SHA")
+	}
+	kind, err := checkpointGit(ctx, m.repoRoot, "--no-replace-objects", "cat-file", "-t", c.Candidate)
+	if err != nil || kind != "commit" {
+		return nil, fmt.Errorf("pending completion candidate is unavailable as a local commit")
+	}
+	ref := fmt.Sprintf("refs/swarm/local-completions/issue-%d/%s", n, c.Candidate)
+	// Create only. An existing direct ref is reusable only at the same commit.
+	_, pinErr := checkpointGit(ctx, m.repoRoot, "-c", "core.fsync=reference", "update-ref", "--no-deref", ref, c.Candidate, strings.Repeat("0", 40))
+	if pinErr != nil {
+		pinned, err := checkpointGit(ctx, m.repoRoot, "for-each-ref", "--format=%(refname) %(objectname) %(symref)", ref)
+		if err != nil || pinned != ref+" "+c.Candidate {
+			return nil, fmt.Errorf("could not pin completion candidate at %s", ref)
+		}
+	}
+	archive := fmt.Sprintf("archive-issue-%d-%s.json", n, c.receiptID)
+	existing, err := root.ReadFile(archive, completionLimit)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		if err = root.WriteFileDurable(archive, raw, 0600); err != nil {
+			return nil, err
+		}
+	case err != nil:
+		return nil, err
+	case !bytes.Equal(existing, raw):
+		return nil, fmt.Errorf("existing completion archive differs from the pending receipt")
+	default:
+		// On retry the prior durable write may have reached rename but not
+		// directory sync. Ensure the archive entry is durable before removal.
+		dir, err := root.OpenDirectory(".")
+		if err != nil {
+			return nil, err
+		}
+		defer dir.Close()
+		if err := dir.Sync(); err != nil {
+			return nil, err
+		}
+	}
+	if err = root.Remove(completionName(n)); err != nil {
+		return nil, err
+	}
+	return &ArchivedCheckpointCompletion{Candidate: c.Candidate, RetentionRef: ref, AlreadyRecorded: st.HeadSHA == c.Candidate}, nil
+}
+
+func isCompletionHex(value string, length int) bool {
+	if len(value) != length || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 // Keep storage paths out of user-visible errors while retaining error identity.

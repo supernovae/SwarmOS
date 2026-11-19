@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
@@ -586,4 +587,218 @@ func TestWorkRoleRoutingDrift(t *testing.T) {
 			}
 		})
 	}
+}
+
+type promptScaffoldRecordingRunner struct {
+	agent.MockRunner
+	observe func(agent.RunRequest)
+}
+
+func (r *promptScaffoldRecordingRunner) Run(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+	r.observe(req)
+	return r.MockRunner.Run(ctx, req)
+}
+
+func TestWorkPromptScaffoldAdvisory(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("requires Linux native execution policy")
+	}
+	for _, driver := range []string{"codex", "claude"} {
+		t.Run(driver, func(t *testing.T) {
+			f := newCLIFixture(t)
+			cfg := rolePreviewConfig(t, f)
+			cfg.DefaultAgent, cfg.PlanMode, cfg.Roles = driver, "agent", nil
+			cfg.BaseBranch = "main"
+			commitRolePreviewConfig(t, f, cfg)
+
+			const prompt = ".swarm/prompts/planner.md"
+			const approvedMarker = "# Approved old planner prompt"
+			const checkoutMarker = "# Checkout-only planner prompt"
+			path := filepath.Join(f.root, prompt)
+			metaPath := filepath.Join(f.root, harness.ManifestPath)
+			read := func(path string) []byte {
+				t.Helper()
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return data
+			}
+			write := func(path string, data []byte) {
+				t.Helper()
+				if err := os.WriteFile(path, data, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			current, meta := read(path), read(metaPath)
+			write(path, []byte(approvedMarker))
+			write(metaPath, []byte(fmt.Sprintf(`{"version":1,"files":{%q:"%x"}}`, prompt, sha256.Sum256([]byte(approvedMarker)))))
+			prGit(t, f.root, "add", prompt, harness.ManifestPath)
+			prGit(t, f.root, "commit", "-m", "Earlier managed scaffold")
+			issue := f.create(t, "agent")
+			n := strconv.Itoa(issue)
+			f.must(t, "issue", "approve", n)
+			base := f.state(t, issue).BaseSHA
+
+			var runnerCalls, resolverCalls int
+			var out, stderr bytes.Buffer
+			run := func(args ...string) error {
+				out.Reset()
+				stderr.Reset()
+				opts := &RootOptions{RepoRoot: f.root, inspectAgent: func(name string, cfg *contract.SwarmConfig, local bool, role string, opts agent.RunnerOptions, _ string) (string, sandbox.ToolCapabilityReport, error) {
+					execution, err := contract.ResolveExecution(cfg, "")
+					if err != nil || execution.Mode != contract.ExecutionIsolated || execution.Backend != contract.BackendNative {
+						t.Fatalf("expected isolated Linux native policy: %+v, %v", execution, err)
+					}
+					return name, sandbox.ToolCapabilityReport{}, nil
+				}}
+				cmd := f.command(opts)
+				cmd.SetOut(&out)
+				cmd.SetErr(&stderr)
+				cmd.SetArgs(append([]string{"issue", "work", n, "--phase=plan"}, args...))
+				return cmd.Execute()
+			}
+			mustRun := func(args ...string) {
+				t.Helper()
+				if err := run(args...); err != nil {
+					t.Fatalf("%v: %v\n%s\n%s", args, err, &out, &stderr)
+				}
+			}
+			assertText := func(text string, wants ...string) {
+				t.Helper()
+				for _, want := range wants {
+					if !strings.Contains(text, want) {
+						t.Fatalf("missing %q in %s", want, text)
+					}
+				}
+			}
+			preview := func(extra ...string) *workflow.PromptScaffoldReport {
+				t.Helper()
+				prevRunnerCalls, prevResolverCalls := runnerCalls, resolverCalls
+				mustRun(append([]string{"--dry-run", "--format=json"}, extra...)...)
+				var envelope struct {
+					Plan workflow.PreflightResult `json:"effective_plan"`
+				}
+				if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+					t.Fatal(err)
+				}
+				if runnerCalls != prevRunnerCalls || resolverCalls != prevResolverCalls || len(envelope.Plan.Blockers) != 0 {
+					t.Fatalf("unexpected runner or blockers during preview: %+v", envelope.Plan)
+				}
+				return envelope.Plan.PromptScaffold
+			}
+			f.resolverRunner = func(name string, approved *contract.SwarmConfig, local bool) (agent.Runner, error) {
+				resolverCalls++
+				if name != driver || approved.DefaultAgent != driver {
+					t.Fatalf("route=%q, approved default=%q", name, approved.DefaultAgent)
+				}
+				return &promptScaffoldRecordingRunner{observe: func(req agent.RunRequest) {
+					runnerCalls++
+					promptBytes := read(filepath.Join(req.WorktreePath, req.SystemPrompt))
+					assertText(string(promptBytes), approvedMarker)
+					if strings.Contains(string(promptBytes), checkoutMarker) {
+						t.Fatal("checkout content reached the compiled prompt")
+					}
+					assertText(stderr.String(), "Warning: Prompt scaffold", "approved commit "+f.state(t, issue).BaseSHA, "swarm issue approve "+n)
+				}}, nil
+			}
+
+			claim, err := f.manager.Acquire(t.Context(), issue, "alice", driver, "plan", time.Hour, cfg.Lease.MaxRenewals)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := lease.SaveClaimToken(f.root, issue, claim.Lease.ClaimID, claim.BaseSHA); err != nil {
+				t.Fatal(err)
+			}
+			write(path, current)
+			write(metaPath, meta)
+			before, refs := f.state(t, issue), prGit(t, f.root, "show-ref")
+			mustRun("--dry-run", "--format=text")
+			assertText(out.String(), "checkout: current", "approved commit "+base+": upgrade-needed",
+				"target branch", "swarm issue release "+n, "swarm issue approve "+n)
+			report := preview()
+			if report == nil || report.Checkout.Status != "current" || report.Approved.Status != "upgrade-needed" || report.ApprovedSHA != base {
+				t.Fatalf("incorrect scaffold report: %+v", report)
+			}
+			assertText(strings.Join(report.NextActions, " "), "target branch", "swarm issue release "+n, "swarm issue approve "+n)
+			after := f.state(t, issue)
+			beforeState, _ := json.Marshal(before)
+			afterState, _ := json.Marshal(after)
+			if !bytes.Equal(beforeState, afterState) || refs != prGit(t, f.root, "show-ref") ||
+				!bytes.Equal(current, read(path)) || !bytes.Equal(meta, read(metaPath)) || runnerCalls != 0 || resolverCalls != 0 {
+				t.Fatal("preview changed fixture state")
+			}
+			if report := preview("--agent=mock"); report != nil {
+				t.Fatalf("non-target route reported scaffold: %+v", report)
+			}
+			write(path, []byte(checkoutMarker))
+			mustRun("--headless", "--progress=false", "--json")
+			if !json.Valid(out.Bytes()) || runnerCalls != 1 {
+				t.Fatalf("ordinary launch calls=%d: %s", runnerCalls, &out)
+			}
+			f.must(t, "issue", "release", n)
+
+			write(path, current)
+			write(metaPath, meta)
+			prGit(t, f.root, "add", prompt, harness.ManifestPath)
+			prGit(t, f.root, "commit", "-m", "Upgrade scaffold")
+			f.must(t, "issue", "approve", n)
+			currentBase := f.state(t, issue).BaseSHA
+			write(path, []byte(checkoutMarker))
+			report = preview()
+			if report == nil || report.Checkout.Status != "manual-review" || report.Approved.Status != "current" || report.ApprovedSHA != currentBase ||
+				strings.Contains(strings.Join(report.NextActions, " "), "swarm issue approve") {
+				t.Fatalf("checkout-only customization: %+v", report)
+			}
+
+			write(metaPath, []byte("{"))
+			prGit(t, f.root, "add", prompt, harness.ManifestPath)
+			prGit(t, f.root, "commit", "-m", "Save custom prompt with invalid metadata")
+			f.must(t, "issue", "approve", n)
+			report = preview()
+			if report == nil || report.Approved.Status != "unverifiable" || report.ApprovedSHA != f.state(t, issue).BaseSHA {
+				t.Fatalf("unverifiable approved scaffold: %+v", report)
+			}
+			assertText(strings.Join(report.NextActions, " "), "Inspect", "swarm issue approve "+n)
+		})
+	}
+
+	t.Run("fresh claim advances base", func(t *testing.T) {
+		f := newCLIFixture(t)
+		cfg := rolePreviewConfig(t, f)
+		cfg.DefaultAgent, cfg.PlanMode, cfg.Roles = "codex", "agent", nil
+		cfg.BaseBranch = "main"
+		commitRolePreviewConfig(t, f, cfg)
+		const prompt = ".swarm/prompts/planner.md"
+		if err := os.WriteFile(filepath.Join(f.root, prompt), []byte("# Older approved prompt"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		prGit(t, f.root, "add", prompt)
+		prGit(t, f.root, "commit", "-m", "Older scaffold")
+		issue := f.create(t, "agent")
+		n := strconv.Itoa(issue)
+		f.must(t, "issue", "approve", n)
+		oldBase := f.state(t, issue).BaseSHA
+		prGit(t, f.root, "commit", "--allow-empty", "-m", "Advance target without a policy change")
+		tip := prGit(t, f.root, "rev-parse", "HEAD")
+		var out, stderr bytes.Buffer
+		calls := 0
+		f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+			calls++
+			if !strings.Contains(stderr.String(), "Prompt scaffold approved commit "+tip+": unverifiable") ||
+				strings.Contains(stderr.String(), "Prompt scaffold approved commit "+oldBase) {
+				t.Fatalf("warning did not reflect the final base: %s", &stderr)
+			}
+			return &agent.MockRunner{}, nil
+		}
+		cmd := f.command(&RootOptions{RepoRoot: f.root, inspectAgent: func(name string, _ *contract.SwarmConfig, _ bool, _ string, _ agent.RunnerOptions, _ string) (string, sandbox.ToolCapabilityReport, error) {
+			return name, sandbox.ToolCapabilityReport{}, nil
+		}})
+		cmd.SetOut(&out)
+		cmd.SetErr(&stderr)
+		cmd.SetArgs([]string{"issue", "work", n, "--phase=plan", "--headless", "--progress=false", "--json"})
+		if err := cmd.Execute(); err != nil || calls != 1 || !json.Valid(out.Bytes()) {
+			t.Fatalf("advanced base launch calls=%d err=%v\n%s\n%s", calls, err, &out, &stderr)
+		}
+	})
 }

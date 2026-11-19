@@ -116,7 +116,7 @@ func TestRunDoctorObservedMatchesSilent(t *testing.T) {
 	if !reflect.DeepEqual(got, silent) || !reflect.DeepEqual(got, observed) {
 		t.Fatalf("got %+v; want %+v", got, silent)
 	}
-	if !reflect.DeepEqual(names, []string{"git", "github-auth", ".swarm/config.yaml", ".swarm/validation/required-checks.yaml", "reviewer-runtime"}) {
+	if !reflect.DeepEqual(names, []string{"prompt-scaffold", "git", "github-auth", ".swarm/config.yaml", ".swarm/validation/required-checks.yaml", "reviewer-runtime"}) {
 		t.Fatal(names)
 	}
 }
@@ -195,17 +195,23 @@ func TestRunDoctorAuthAndConfiguredChecks(t *testing.T) {
 			case "command-failure":
 				wantName, wantStatus = "github-token", "FAIL"
 			}
-			if got[1].Name != wantName || got[1].Status != wantStatus {
-				t.Fatal(got[1])
-			}
-			timeouts, binaries := 0, 0
+			trackers, timeouts, binaries := 0, 0, 0
 			for _, c := range got {
+				if c.Category == "tracker" {
+					trackers++
+					if c.Name != wantName || c.Status != wantStatus {
+						t.Fatalf("tracker check = %+v, want %s %s", c, wantName, wantStatus)
+					}
+				}
 				if strings.HasSuffix(c.Name, " timeout") {
 					timeouts++
 				}
 				if c.Category == "binary" {
 					binaries++
 				}
+			}
+			if trackers != 1 {
+				t.Fatalf("got %d tracker checks, want 1", trackers)
 			}
 			if timeouts != 4 || binaries == 0 {
 				t.Fatalf("timeouts %d binaries %d", timeouts, binaries)

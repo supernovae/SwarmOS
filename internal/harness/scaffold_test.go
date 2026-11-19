@@ -2150,3 +2150,178 @@ func TestOnboardingRoleExample(t *testing.T) {
 		t.Fatalf("merge lost policy: %+v", got)
 	}
 }
+
+func TestInitPromptScaffoldRevision(t *testing.T) {
+	root := t.TempDir()
+	opts := InitOptions{RepoRoot: root, SwarmVersion: "v0.6.0"}
+	if out, err := gitfixture.Command(t, "", "-C", root, "init", "-q", "-b", "main").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+	read := func(path string) []byte {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	write := func(path string, data []byte) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, path), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	init := func(opts InitOptions) *InitResult {
+		t.Helper()
+		result, err := InitRepository(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	getManifest := func() manifest {
+		t.Helper()
+		var m manifest
+		if err := json.Unmarshal(read(ManifestPath), &m); err != nil {
+			t.Fatal(err)
+		}
+		if m.Version != 1 || m.ScaffoldRevision != promptScaffoldRevision || m.SwarmVersion != opts.SwarmVersion {
+			t.Fatalf("manifest metadata: %+v", m)
+		}
+		return m
+	}
+	init(opts)
+	m := getManifest()
+	m.ScaffoldRevision = 0
+	workflow := ".github/workflows/swarm-validate.yml"
+	pinned := string(read(workflow))
+	owned := []string{".swarm/prompts/planner.md", ".swarm/prompts/variants/planner.detailed.md"}
+	current := map[string]string{}
+	old := []byte("Earlier managed prompt")
+	for _, path := range owned {
+		current[path] = string(read(path))
+		write(path, old)
+		m.Files[path] = digest(old)
+	}
+	edited, unowned, missing := ".swarm/prompts/developer.md", ".swarm/prompts/reviewer.md", ".swarm/prompts/tester.md"
+	delete(m.Files, unowned)
+	write(edited, old)
+	write(unowned, old)
+	if err := os.Remove(filepath.Join(root, missing)); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(ManifestPath, data)
+	configPath := ".swarm/config.yaml"
+	config := append(read(configPath), []byte("\n# Maintainer config\n")...)
+	write(configPath, config)
+	before := snapshotTree(t, root)
+	previewOpts := opts
+	previewOpts.DryRun = true
+	preview := init(previewOpts)
+	if !maps.Equal(before, snapshotTree(t, root)) || !slices.Equal(preview.UpdatedFiles, owned) ||
+		!slices.Contains(preview.CustomizedFiles, edited) || !slices.Contains(preview.PreservedFiles, unowned) ||
+		!slices.Contains(preview.CreatedFiles, missing) {
+		t.Fatalf("unexpected preview: %+v", preview)
+	}
+	init(opts)
+	got := getManifest()
+	for _, path := range owned {
+		if string(read(path)) != current[path] || got.Files[path] != digest([]byte(current[path])) {
+			t.Errorf("managed prompt not updated: %s", path)
+		}
+	}
+	if string(read(workflow)) != pinned || string(read(configPath)) != string(config) ||
+		string(read(edited)) != string(old) || string(read(unowned)) != string(old) ||
+		got.Files[edited] != m.Files[edited] || got.Files[unowned] != "" {
+		t.Fatal("init changed the pin, custom files, or ownership")
+	}
+	if assessment := AssessPromptScaffold(root); assessment.Status != "manual-review" {
+		t.Fatalf("refreshed manifest hid preserved prompts: %+v", assessment)
+	}
+	if err := os.Remove(filepath.Join(root, ManifestPath)); err != nil {
+		t.Fatal(err)
+	}
+	init(opts)
+	got = getManifest()
+	if got.Files[edited] != "" || got.Files[unowned] != "" || string(read(edited)) != string(old) || string(read(unowned)) != string(old) {
+		t.Fatal("init acquired ownership of retained prompts without a manifest")
+	}
+}
+
+func TestPromptScaffoldAssessment(t *testing.T) {
+	root := t.TempDir()
+	if _, err := InitRepository(InitOptions{RepoRoot: root}); err != nil {
+		t.Fatal(err)
+	}
+	commit := func(args ...string) string {
+		t.Helper()
+		out, err := gitfixture.Command(t, "", append([]string{"-C", root}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	commit("init", "-q", "-b", "main")
+	const changed = ".swarm/prompts/planner.md"
+	const missing = ".swarm/prompts/variants/planner.urgent.md"
+	write := func(path, data string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, path), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name, metadata, fileStatus, manifestStatus string
+	}{
+		{"legacy", `{"version":1,"files":{}}`, "current", "valid"},
+		{"older", fmt.Sprintf(`{"version":1,"scaffold_revision":1,"files":{%q:%q}}`, changed, digest([]byte("old"))), "older-managed", "valid"},
+		{"mismatch", fmt.Sprintf(`{"version":1,"files":{%q:%q}}`, changed, digest([]byte("different"))), "customized-or-unowned", "valid"},
+		{"invalid hash", `{"version":1,"files":{".swarm/prompts/planner.md":"x"}}`, "unverifiable", "valid"},
+		{"unowned", `{"version":1,"files":{}}`, "customized-or-unowned", "valid"},
+		{"invalid manifest", "{", "unverifiable", "invalid"},
+		{"missing manifest", "", "unverifiable", "missing"},
+		{"unreadable file", "", "unreadable", "missing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.metadata != "" {
+				write(ManifestPath, tc.metadata)
+			} else if err := os.Remove(filepath.Join(root, ManifestPath)); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			if tc.name != "legacy" {
+				write(changed, "old")
+			}
+			if tc.name == "older" {
+				if err := os.Remove(filepath.Join(root, missing)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.name == "unreadable file" {
+				if err := os.Remove(filepath.Join(root, changed)); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("reviewer.md", filepath.Join(root, changed)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			commit("add", ".")
+			commit("-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "--allow-empty", "-qm", tc.name)
+			checkout := AssessPromptScaffold(root)
+			approved := AssessPromptScaffoldAt(t.Context(), root, commit("rev-parse", "HEAD"))
+			if checkout.ManifestStatus != tc.manifestStatus || approved.ManifestStatus != tc.manifestStatus || !reflect.DeepEqual(checkout.Files, approved.Files) {
+				t.Fatalf("checkout %+v, approved %+v", checkout, approved)
+			}
+			statuses := map[string]string{}
+			for _, file := range checkout.Files {
+				statuses[file.Path] = file.Status
+			}
+			if statuses[changed] != tc.fileStatus || (tc.name == "older" && (statuses[missing] != "missing" || checkout.DeclaredRevision != 1)) {
+				t.Fatalf("unexpected statuses: %v", statuses)
+			}
+		})
+	}
+}

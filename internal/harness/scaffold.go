@@ -379,18 +379,9 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 	}
 
 	// 4. Role prompts
-	for _, role := range []string{"planner.md", "reviewer.md", "developer.md", "tester.md"} {
-		if err := copyEmbedded("templates/swarm/prompts/"+role, ".swarm/prompts/"+role); err != nil {
+	for _, name := range promptScaffoldInventory() {
+		if err := copyEmbedded("templates/swarm/prompts/"+name, ".swarm/prompts/"+name); err != nil {
 			return nil, err
-		}
-	}
-
-	for _, role := range []string{"planner", "reviewer"} {
-		for _, variant := range []string{"compact", "sensitive", "detailed", "investigation", "urgent"} {
-			name := role + "." + variant + ".md"
-			if err := copyEmbedded("templates/swarm/prompts/variants/"+name, ".swarm/prompts/variants/"+name); err != nil {
-				return nil, err
-			}
 		}
 	}
 	// 5. Schemas
@@ -490,6 +481,7 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 	if opts.SwarmVersion != "" {
 		recorded.SwarmVersion = opts.SwarmVersion
 	}
+	recorded.ScaffoldRevision = promptScaffoldRevision
 	if err := recorded.save(safe); err != nil {
 		return nil, err
 	}
@@ -913,6 +905,16 @@ func RunDoctor(repoRoot string, checkGitHubAuth bool) []DoctorCheck {
 
 func RunDoctorWithRunner(repoRoot string, checkGitHubAuth bool, run DoctorRunner) []DoctorCheck {
 	var checks []DoctorCheck
+
+	checks = append(checks, run.Run("policy", "prompt-scaffold", func() DoctorCheck {
+		assessment := AssessPromptScaffold(repoRoot)
+		check := DoctorCheck{Category: "policy", Name: "prompt-scaffold", Status: "OK", Detail: assessment.Summary()}
+		if assessment.Status != "current" {
+			check.Status = "WARN"
+			check.Detail = strings.Join(append([]string{check.Detail}, assessment.CheckoutActions()...), " ")
+		}
+		return check
+	}))
 
 	checks = append(checks, run.Run("system", "git", func() DoctorCheck {
 		// 1. Git binary

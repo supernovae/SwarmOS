@@ -110,6 +110,9 @@ func TestValidationSubmissionProgressOutput(t *testing.T) {
 									expected = "Required checks: passed\nAcceptance evidence: complete\nExternal verification: pending\n  1. Produce a checked checkpoint (Maintainer verifies the published checkpoint)\n"
 								}
 							}
+							if family == "issue" && operation == "submit" {
+								expected = "Running required checks: an immutable build version is required\n" + expected
+							}
 							if diag != expected {
 								t.Fatalf("quiet progress: %s", diag)
 							}

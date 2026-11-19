@@ -128,3 +128,8 @@ Read-only roles may see write tool names, but workspace writes remain denied.
 Dependency preparation supplies read-only caches and resolved toolchain mounts;
 it does not grant agent network access. Node capability labels and WorkUnit
 `required_capabilities` continue to select workers independently of this report.
+
+On Linux, direct isolated issue work checks the native Codex tool environment
+before claiming work. Run `swarm repo doctor` to check the tools selected for
+the current checkout. See [project readiness](../project.md#project-readiness)
+for local package requirements and offline OCI configuration.

@@ -42,24 +42,18 @@ func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest, lifecycle 
 		in = os.Stdin
 		stdout, stderr = io.MultiWriter(os.Stdout, &out, transcript, progress.ActivityFrom(ctx).Writer(time.Now)), io.MultiWriter(os.Stderr, &out, transcript, progress.ActivityFrom(ctx).Writer(time.Now))
 	}
-	limits, limitErr := contract.ResolveAgentLimits(a.executionPolicy, req.Role, strings.EqualFold(req.Mode, "interactive"), 0)
-	if limitErr != nil {
-		return nil, limitErr
+	options, err := a.isolatedWorkerOptions(req)
+	if err != nil {
+		return nil, err
 	}
-	options := sandbox.WorkerOptions{Runtime: a.containerRuntime, Image: a.container, Role: req.Role,
-		ReadOnly: req.ReadOnly || req.Role == "planner" || req.Role == "reviewer", Limits: limits, Warning: os.Stderr, RecoveryRoot: req.RecoveryRoot, CheckImport: req.CheckImport, PreserveRejected: req.PreserveRejected}
-	options.BrowserProfile = a.executionPolicy.BrowserProfile
 	options.Lifecycle = lifecycle
 	options.Effort = a.effort
 	collector := &GuidanceCollector{}
 	options.GuidanceDelivered = collector.Delivered
 	options.ProjectPlan = req.ProjectPlan
-	options.Dependencies = req.Dependencies
-	options.Inspections, options.InspectionPolicy = a.inspections, a.inspectionPolicy
 	if req.ReadOnly && req.Role == "reviewer" {
 		options.OutputDir = filepath.Join(req.WorktreePath, ".swarm", "active-output")
 	}
-	var err error
 	var nativeVersion string
 	command := append([]string{bin}, args...)
 	if a.sandboxRuntime == "codex-native" {
@@ -89,4 +83,17 @@ func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest, lifecycle 
 		return result, err
 	}
 	return result, nil
+}
+
+func (a *CLIAdapter) isolatedWorkerOptions(req RunRequest) (sandbox.WorkerOptions, error) {
+	limits, limitErr := contract.ResolveAgentLimits(a.executionPolicy, req.Role, strings.EqualFold(req.Mode, "interactive"), 0)
+	if limitErr != nil {
+		return sandbox.WorkerOptions{}, limitErr
+	}
+	options := sandbox.WorkerOptions{Runtime: a.containerRuntime, Image: a.container, Role: req.Role,
+		ReadOnly: req.ReadOnly || req.Role == "planner" || req.Role == "reviewer", Limits: limits, Warning: os.Stderr, RecoveryRoot: req.RecoveryRoot, CheckImport: req.CheckImport, PreserveRejected: req.PreserveRejected}
+	options.BrowserProfile = a.executionPolicy.BrowserProfile
+	options.Dependencies = req.Dependencies
+	options.Inspections, options.InspectionPolicy = a.inspections, a.inspectionPolicy
+	return options, nil
 }

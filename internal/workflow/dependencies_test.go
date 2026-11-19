@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
@@ -341,4 +342,77 @@ func TestBrowserProfilePreflightNoClaim(t *testing.T) {
 	if !strings.Contains(result.BrowserProfile, "unavailable") || len(result.Blockers) == 0 {
 		t.Fatalf("inspection lost browser blocker: %+v", result)
 	}
+}
+
+func TestReadinessPreclaim(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("readiness admission is scoped to Linux")
+	}
+	eng, root, issue := approvedDependencyTask(t)
+	eng.LookupEnv = func(string) (string, bool) { return "", false }
+	cfg, err := harness.LoadConfig(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Execution = contract.ExecutionConfig{Mode: contract.ExecutionIsolated, Backend: contract.BackendNative}
+	missing := filepath.Join(t.TempDir(), "missing-selected-codex")
+	ac := cfg.Agents["codex"]
+	ac.Binary = missing
+	cfg.Agents["codex"] = ac
+	raw, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".swarm", "config.yaml"), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "package.json"), []byte(`{"name":"fixture","version":"1.0.0"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", ".swarm/config.yaml", "package.json"}, {"commit", "-qm", "approved fixture project"}} {
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	approved, err := eng.LeaseManager.ApproveTask(t.Context(), issue, "local-dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng.inspectAgent = func(string, *contract.SwarmConfig, bool, string, agent.RunnerOptions, string) (string, sandbox.ToolCapabilityReport, error) {
+		return "fixture", sandbox.ToolCapabilityReport{}, nil
+	}
+	prefetched, launched := false, false
+	stubAgentDependencies(t, func(context.Context, contract.ExecutionConfig, string, string, sandbox.DependencyPolicy) (sandbox.Dependencies, error) {
+		prefetched = true
+		return sandbox.Dependencies{}, nil
+	})
+	eng.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+		launched = true
+		return nil, errors.New("agent launch was reached")
+	}
+	_, err = eng.ExecuteWork(t.Context(), WorkOptions{RepoRoot: root, IssueNumber: issue, AgentName: "codex", Phase: "all", Headless: true})
+	if err == nil || !strings.Contains(err.Error(), "developer readiness") || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("expected selected environment to fail readiness: %v", err)
+	}
+	st, err := eng.LeaseManager.GetCurrentState(t.Context(), issue)
+	if err != nil || st.Lease.ClaimID != approved.Lease.ClaimID || !prefetched || launched {
+		t.Fatalf("state=%+v err=%v prefetched=%t launched=%t", st, err, prefetched, launched)
+	}
+	claimed, err := eng.LeaseManager.Acquire(t.Context(), issue, "local-dev", "codex", "plan", time.Hour, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := WorkOptions{RepoRoot: root, IssueNumber: issue, AgentName: "codex", Phase: "all", Headless: true, ClaimID: claimed.Lease.ClaimID}
+	_, err = eng.ExecuteWork(t.Context(), opts)
+	if err == nil || !strings.Contains(err.Error(), "developer readiness") || launched {
+		t.Fatalf("resumption should also fail readiness before launch: %v", err)
+	}
+	r := workRun{ctx: t.Context(), e: eng, opts: opts, cfg: cfg, st: claimed, pre: &PreflightResult{
+		Readiness: &sandbox.ReadinessReport{Input: "approved base " + claimed.BaseSHA},
+		Agents:    map[string]string{"tester": "codex"},
+	}}
+	if err := r.checkLaunchReadiness("developer", "codex"); err == nil || !strings.Contains(err.Error(), "developer readiness") {
+		t.Fatalf("late developer should be checked separately: %v", err)
+	}
+
 }

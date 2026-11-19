@@ -501,6 +501,24 @@ func TestNodePrefetchRunsNoPackageCode(t *testing.T) {
 		t.Fatalf("npm cache was not filled: %v", err)
 	}
 
+	projects, err := DiscoverReadiness(t.Context(), repo, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, present := range []bool{true, false} {
+		store := filepath.Join(deps.Caches[0].Dir, "npm")
+		if !present {
+			store = t.TempDir()
+		}
+		rows, err := CheckReadiness(t.Context(), projects, "developer", "fixture", "fixture", "", localReadinessExecutor(t, "npm_config_cache="+store))
+		if (err == nil) != present || rows[1].Status != "passed" {
+			t.Fatalf("present=%t rows=%+v err=%v", present, rows, err)
+		}
+	}
+	if entries, err := os.ReadDir(markers); err != nil || len(entries) != 0 {
+		t.Fatalf("offline readiness ran lifecycle scripts: %v (%v)", entries, err)
+	}
+
 	// Control: the same fixture with scripts enabled does write markers, so
 	// the assertion above can fail.
 	project := resolvedTempDir(t)

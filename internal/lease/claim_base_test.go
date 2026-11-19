@@ -370,3 +370,75 @@ func TestFreshClaimBaseEarlyErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestReadinessFreshClaimBase(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		gate         string
+		wantCallback bool
+		fail         bool
+		race         bool
+	}{
+		{name: "advance", gate: "agent", wantCallback: true},
+		{name: "reject", gate: "agent", wantCallback: true, fail: true},
+		{name: "CAS conflict", gate: "agent", wantCallback: true, race: true},
+		{name: "human", gate: "human"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			m, lt, issue := testManager(t)
+			body := strings.Replace(issue.Body, "gate: human", "gate: "+tc.gate, 1)
+			if _, err := lt.UpdateIssueBody(ctx, issue.Number, body); err != nil {
+				t.Fatal(err)
+			}
+			initial, err := m.ApproveTask(ctx, issue.Number, "local-dev")
+			if err != nil {
+				t.Fatal(err)
+			}
+			git := func(args ...string) string {
+				t.Helper()
+				cmd := gitfixture.Command(t, "", args...)
+				cmd.Dir = m.repoRoot
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("git %v: %v: %s", args, err, out)
+				}
+				return strings.TrimSpace(string(out))
+			}
+			git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "advance")
+			tip := git("rev-parse", "HEAD")
+			if tc.race {
+				m.store = &claimRaceStore{Store: m.store}
+			}
+			rejected := errors.New("required SDK missing")
+			called := false
+			claimed, err := m.AcquireDirectChecked(ctx, issue.Number, "local-dev", "codex", "plan", time.Hour, 1, func(candidate *IssueState) error {
+				called = true
+				if candidate.BaseSHA != tip || candidate.Lease.Status == "active" {
+					t.Fatalf("candidate: %+v", candidate)
+				}
+				if tc.fail {
+					return rejected
+				}
+				candidate.BaseSHA = initial.BaseSHA
+				return nil
+			})
+			if called != tc.wantCallback {
+				t.Fatalf("callback=%t want=%t, error=%v", called, tc.wantCallback, err)
+			}
+			if tc.name == "advance" {
+				if err != nil || claimed.BaseSHA != tip {
+					t.Fatalf("claim=%+v err=%v", claimed, err)
+				}
+				return
+			}
+			if err == nil || (tc.fail && !errors.Is(err, rejected)) || (tc.race && !errors.Is(err, ErrClaimRaceLost)) {
+				t.Fatalf("unexpected error %v", err)
+			}
+			st, loadErr := m.GetCurrentState(ctx, issue.Number)
+			if loadErr != nil || st.BaseSHA != initial.BaseSHA || st.Lease.Status == "active" {
+				t.Fatalf("state=%+v err=%v", st, loadErr)
+			}
+		})
+	}
+}

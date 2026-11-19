@@ -480,6 +480,29 @@ A CLI `--gate` flag can always make review stricter (for example, upgrading `non
 - **[Workflows & Review Gates (`docs/WORKFLOWS.md`)](WORKFLOWS.md)** — Role prompts, artifacts, and gate transitions.
 - **[Architecture (`docs/ARCHITECTURE.md`)](ARCHITECTURE.md)** — Git-CAS coordination, fencing, and worktree lifecycle.
 
+### Project readiness
+
+On Linux, direct isolated issue work checks the selected developer and tester
+environments against the approved base before claiming work. Use
+`swarm repo doctor` to inspect the current checkout. Run
+`swarm issue work <number> --dry-run` to see the approved base and checks
+awaiting execution. Doctor checks packages using the stores already present on
+the worker. If a repository cache is absent, issue work prepares its supported
+lockfiles before running the offline checks.
+
+For native Codex and OpenCode, select worker entries with `roles.developer`
+and `roles.tester` in `.swarm/config.yaml` and install the tools those entries
+need on the worker. Put C and C++ headers and libraries in paths visible to
+the isolated compiler. For .NET, provision the SDK, reference packs, and
+local NuGet global packages before running doctor.
+
+To supply tools and dependencies together, provision a local OCI image and set
+`execution.backend: oci`, `execution.container_runtime` to `docker` or
+`podman`, and `execution.container_image` to the image's digest-pinned
+reference. Set `authentication: none` on each selected offline agent entry.
+The image must contain the tools and dependencies that the worker will use
+offline.
+
 ### Task-local browser previews
 
 Enable browser checks when agents need to verify a page's rendered output. Add this to the repository policy before approving work:

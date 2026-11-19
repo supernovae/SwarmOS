@@ -2,10 +2,12 @@ package agent
 
 import (
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/sandbox"
 )
 
 func TestDefaultModeNeverRunsHostAgent(t *testing.T) {
@@ -116,5 +118,52 @@ func TestIsolatedBackendIsExplicit(t *testing.T) {
 	}
 	if got := r.Provenance("developer", false).Sandbox; got != "container" {
 		t.Fatalf("explicit OCI selected %q", got)
+	}
+}
+
+func TestReadinessRoleBoundary(t *testing.T) {
+	projects := []sandbox.ReadinessProject{{Directory: ".", Ecosystem: "go", Source: "go.mod"}}
+	cfg := &contract.SwarmConfig{Agents: map[string]contract.AgentConfig{
+		"native-dev":     {Harness: "codex", Binary: os.Args[0], Roles: []string{"developer"}},
+		"delegated-test": {Harness: "opencode", Binary: os.Args[0], Roles: []string{"tester"}},
+	}}
+	opts := RunnerOptions{LookupEnv: func(string) (string, bool) { return "", false }}
+	for _, tc := range []struct{ name, role, boundary string }{
+		{"native-dev", "developer", "codex-native"},
+		{"delegated-test", "tester", "harness-tools-bwrap"},
+	} {
+		report, err := CheckConfiguredReadiness(t.Context(), projects, tc.name, tc.role, cfg, true, opts, sandbox.Dependencies{}, "inspection")
+		if err != nil || len(report) == 0 || report[0].Boundary != tc.boundary || report[0].Status != "unverified" {
+			t.Fatalf("role=%s rows=%+v err=%v", tc.role, report, err)
+		}
+	}
+	if runtime.GOOS == "linux" {
+		_, err := CheckConfiguredReadiness(t.Context(), projects, "native-dev", "tester", cfg, true, opts, sandbox.Dependencies{}, "")
+		if err == nil || !strings.Contains(err.Error(), "not permitted") {
+			t.Fatalf("role eligibility: %v", err)
+		}
+	}
+}
+
+func TestReadinessPinnedOCIRoleOverride(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("readiness supports the Linux OCI worker")
+	}
+	projects := []sandbox.ReadinessProject{{Directory: ".", Ecosystem: "go", Source: "go.mod"}}
+	cfg := &contract.SwarmConfig{
+		Execution: contract.ExecutionConfig{Mode: contract.ExecutionIsolated, Backend: contract.BackendOCI, ContainerRuntime: "docker", ContainerImage: "fixture/base@sha256:" + strings.Repeat("e", 64)},
+		Agents: map[string]contract.AgentConfig{
+			"oci-dev":  {Harness: "codex", Binary: "codex", Authentication: "none", Roles: []string{"developer"}},
+			"oci-test": {Harness: "opencode", Binary: "opencode", Authentication: "none", Roles: []string{"tester"}, ContainerRuntime: "podman", ContainerImage: "fixture/test:unpinned"},
+		},
+	}
+	opts := RunnerOptions{LookupEnv: func(string) (string, bool) { return "", false }}
+	dev, err := CheckConfiguredReadiness(t.Context(), projects, "oci-dev", "developer", cfg, true, opts, sandbox.Dependencies{}, "inspection")
+	if err != nil || !strings.HasPrefix(dev[0].Boundary, "oci:docker/fixture/base@sha256:") {
+		t.Fatalf("developer=%+v err=%v", dev, err)
+	}
+	tester, err := CheckConfiguredReadiness(t.Context(), projects, "oci-test", "tester", cfg, true, opts, sandbox.Dependencies{}, "")
+	if err == nil || !strings.Contains(err.Error(), "pinned by sha256") || tester[1].Boundary != "oci:podman/fixture/test:unpinned" || tester[1].Status != "failed" {
+		t.Fatalf("tester=%+v err=%v", tester, err)
 	}
 }

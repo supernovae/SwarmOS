@@ -51,6 +51,7 @@ var (
 )
 
 type WorkOptions struct {
+	ManualClaim              bool // Select and stage a claim without starting an isolated worker.
 	AssessPromptScaffold     bool
 	OnPromptScaffoldAdvisory func(*PromptScaffoldReport)
 	CompareRoleRouting       bool
@@ -166,11 +167,12 @@ func LeadRole(phase string) string {
 
 // PreflightResult is the immutable execution selection made before a claim.
 type PreflightResult struct {
-	PromptScaffold        *PromptScaffoldReport  `json:"prompt_scaffold,omitempty"`
-	RoleRoutingComparison *RoleRoutingComparison `json:"role_routing_comparison,omitempty"`
-	RolePolicy            string                 `json:"role_policy,omitempty"`
-	RolePreview           []RolePreview          `json:"role_preview,omitempty"`
-	Continuation          *ContinuationPreview   `json:"continuation,omitempty"`
+	Readiness             *sandbox.ReadinessReport `json:"readiness,omitempty"`
+	PromptScaffold        *PromptScaffoldReport    `json:"prompt_scaffold,omitempty"`
+	RoleRoutingComparison *RoleRoutingComparison   `json:"role_routing_comparison,omitempty"`
+	RolePolicy            string                   `json:"role_policy,omitempty"`
+	RolePreview           []RolePreview            `json:"role_preview,omitempty"`
+	Continuation          *ContinuationPreview     `json:"continuation,omitempty"`
 	ToolCapabilities      map[string]sandbox.ToolCapabilityReport
 	BrowserProfile        string
 	Execution             contract.ExecutionConfig
@@ -562,20 +564,7 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 			blockers = append(blockers, err.Error())
 		}
 	}
-	if execution.Mode == contract.ExecutionIsolated && (slices.Contains(roles, "developer") || opts.Phase == "test") && len(checks.RequiredChecks) > 0 {
-		var runtimeErr error
-		if execution.Backend == contract.BackendNative {
-			runtimeErr = sandbox.CheckNativeValidation(ctx, cfg)
-		} else {
-			runtimeErr = sandbox.CheckWorkerRuntime(ctx, execution.ContainerRuntime, execution.ContainerImage)
-		}
-		if err := runtimeErr; err != nil {
-			if !opts.InspectOnly {
-				return nil, fmt.Errorf("validation runtime preflight: %w", err)
-			}
-			blockers = append(blockers, fmt.Sprintf("validation runtime preflight: %v", err))
-		}
-	}
+
 	// Prefetch from the approved base before claiming, so a missing module
 	// stops here rather than inside a sandbox.
 	var deps sandbox.Dependencies
@@ -646,6 +635,30 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 	}
 	result := &PreflightResult{RolePolicy: rolePolicy, RolePreview: rolePreview, Continuation: continuation, ToolCapabilities: capabilities, BrowserProfile: browserProfile, Execution: execution, Blockers: blockers, Issue: iss, WorkUnit: wu, Workflow: wf, Config: cfg, BaseSHA: state.BaseSHA, Gate: gate, Agents: agents,
 		Binaries: binaries, Validation: checks, TaskDigest: state.TaskDigest, PolicyDigest: state.PolicyDigest, Phase: opts.Phase, Dependencies: deps}
+	if e.issueReadiness(opts, state, execution) {
+		report, readinessErr := e.checkIssueReadiness(ctx, opts, cfg, state.BaseSHA, deps, agents, rolePreview)
+		if readinessErr != nil {
+			if !opts.InspectOnly {
+				return nil, readinessErr
+			}
+			result.Blockers = append(result.Blockers, readinessErr.Error())
+		}
+		result.Readiness = report
+	}
+	if execution.Mode == contract.ExecutionIsolated && (slices.Contains(roles, "developer") || opts.Phase == "test") && len(checks.RequiredChecks) > 0 {
+		var runtimeErr error
+		if execution.Backend == contract.BackendNative {
+			runtimeErr = sandbox.CheckNativeValidation(ctx, cfg)
+		} else {
+			runtimeErr = sandbox.CheckWorkerRuntime(ctx, execution.ContainerRuntime, execution.ContainerImage)
+		}
+		if err := runtimeErr; err != nil {
+			if !opts.InspectOnly {
+				return nil, fmt.Errorf("validation runtime preflight: %w", err)
+			}
+			result.Blockers = append(result.Blockers, fmt.Sprintf("validation runtime preflight: %v", err))
+		}
+	}
 	result.RoleRoutingComparison = e.compareRoleRouting(ctx, opts, result, state)
 	result.PromptScaffold = e.inspectPromptScaffold(ctx, opts, result, state)
 	return result, nil

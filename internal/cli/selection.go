@@ -274,7 +274,7 @@ func pullNextReadyIssueResolved(ctx context.Context, cmd *cobra.Command, rootOpt
 			role := workflow.LeadRole(phase)
 			var claimed *lease.IssueState
 			err = opts.SetupProgress.ReportSetupPhase(ctx, issue.Number, "claim", func() error {
-				claimed, err = mgr.Acquire(ctx, issue.Number, owner, preflight.Agents[role], phase, duration, preflight.Config.Lease.MaxRenewals)
+				claimed, err = engine.AcquireAfterPreflight(ctx, selection, preflight, owner, preflight.Agents[role], phase, duration)
 				return err
 			})
 			if err != nil {

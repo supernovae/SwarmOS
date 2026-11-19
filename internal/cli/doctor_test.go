@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -290,11 +291,15 @@ func TestDoctorCapabilitiesJSON(t *testing.T) {
 		t.Fatal("capabilities flag changed JSON")
 	}
 	var result struct {
-		Status  string                         `json:"status"`
-		Reports []sandbox.ToolCapabilityReport `json:"tool_capabilities"`
+		Readiness sandbox.ReadinessReport        `json:"readiness"`
+		Status    string                         `json:"status"`
+		Reports   []sandbox.ToolCapabilityReport `json:"tool_capabilities"`
 	}
 	if err := json.Unmarshal([]byte(plain), &result); err != nil {
 		t.Fatal(err)
+	}
+	if result.Readiness.Input != "checkout" {
+		t.Fatalf("missing checkout identity: %+v", result.Readiness)
 	}
 	if result.Status != "failed" || !reflect.DeepEqual(result.Reports, reports) {
 		t.Fatalf("JSON reports: %+v; want %+v", result, reports)
@@ -448,5 +453,41 @@ func TestDoctorPromptScaffoldStatus(t *testing.T) {
 				t.Fatal("doctor changed fixture files")
 			}
 		})
+	}
+}
+
+func TestReadinessDoctor(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("native readiness requires Linux")
+	}
+	f := newCLIFixture(t)
+	cfg, err := harness.LoadConfig(f.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Roles = map[string]string{"developer": "checkout-dev", "tester": "checkout-test"}
+	cfg.Agents["checkout-dev"] = contract.AgentConfig{Harness: "codex", Binary: filepath.Join(t.TempDir(), "missing-codex")}
+	cfg.Agents["checkout-test"] = contract.AgentConfig{Harness: "opencode", Binary: filepath.Join(t.TempDir(), "missing-opencode")}
+	cfg.Execution = contract.ExecutionConfig{Mode: contract.ExecutionIsolated, Backend: contract.BackendNative}
+	if err := os.WriteFile(filepath.Join(f.root, "package.json"), []byte(`{"name":"checkout","version":"1.0.0"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	report := sandbox.ReadinessReport{Input: "checkout"}
+	f.setenv("SWARM_EXECUTION_MODE", "")
+	opts := f.options(&RootOptions{RepoRoot: f.root})
+	err = doctorReadiness(t.Context(), f.root, cfg, true, opts, &report)
+	if err == nil || len(report.Rows) != 4 {
+		t.Fatalf("readiness=%+v err=%v", report, err)
+	}
+	if report.Rows[1].Agent != "checkout-dev" || report.Rows[1].Status != "failed" ||
+		report.Rows[3].Agent != "checkout-test" || report.Rows[3].Status != "failed" {
+		t.Fatalf("wrong selected entries: %+v", report.Rows)
+	}
+	var out strings.Builder
+	writeReadiness(&out, &report)
+	for _, want := range []string{"Project readiness (checkout)", "checkout-dev/codex-native", "checkout-test/harness-tools-bwrap"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("readiness text omitted %q: %s", want, out.String())
+		}
 	}
 }

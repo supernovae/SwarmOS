@@ -162,6 +162,16 @@ This route supports direct local and GitHub issue work with native isolated Code
 
 Reconciliation validates a pinned candidate snapshot using the approved base's checks and protected paths. It then atomically updates the remote task branch and authoritative checkpoint, recording predecessor and replacement heads in the existing rebase evidence. A changed remote head, claim, task, plan, or local candidate stops publication; preserve your work and inspect status again. This mode supports upstream Git-backed and local file-backed issue work before PR submission. For a linked PR, use the [PR revision workflow](developer.md#continuing-an-existing-pr). Fork checkpoint reconciliation is unsupported. Running `issue reconcile` without `--checkpoint` retains its existing PR-outcome repair behavior.
 
+## Archiving a stale implementation receipt
+
+When interrupted work leaves a pending implementation receipt and the claim or approval inputs change, SwarmOS reports the preserved candidate and a receipt selector. Check the issue with `swarm issue status 29` from the original coordinator checkout, where the receipt is stored. If the original claim is active, ask its owner to release it or a maintainer to revoke it where supported. If it expired, use `swarm issue claim 29` to establish a successor. If claim setup reports a divergent checkout, leave the preserved worktree in place and check status for the successor. Once the original claim is released, revoked, or superseded, a maintainer can archive the receipt from the original checkout using the selector from the diagnostic.
+
+```bash
+swarm issue archive-completion 29 --expected-receipt FULL_RECEIPT_SHA256
+```
+
+Archiving keeps the candidate reachable through the local ref printed by the command. If the candidate is already the recorded checkpoint, follow the current claim's plan and validation steps. Otherwise, with the preserved worktree and the current checkpoint predecessor, use the reconciliation preview above. For a first checkpoint, use the approved base as the predecessor. Reconciliation applies current approval and validation to the candidate.
+
 ## Discarding an abandoned checkpoint
 
 Sometimes a recorded checkpoint should not be continued. For example, an attempt was released, the WorkUnit was edited and re-approved on a newer base, and the old checkpoint no longer descends from it. `swarm issue claim` and `swarm issue work` then stop with `checkpoint ... does not descend from approved base ...`. If nobody holds a claim and the issue has no PR, a maintainer can discard the checkpoint. Copy the full SHA from `swarm issue status 29`:

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -639,5 +640,267 @@ func TestCheckpointCompletionAfterDroppedCheckpoint(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestCheckpointCompletionArchive(t *testing.T) {
+	t.Run("rejections", func(t *testing.T) {
+		for _, scenario := range []string{"active", "expired", "wrong selector", "unauthorized", "gateway", "fork", "pr", "cleanup", "corrupt", "missing candidate", "bad ref", "archive failure"} {
+			t.Run(scenario, func(t *testing.T) {
+				f := completionFixture(t, true)
+				ctx := t.Context()
+				c, err := f.m.InspectCheckpointCompletion(ctx, f.n)
+				if err != nil {
+					t.Fatal(err)
+				}
+				root, _, err := f.m.completionRoot(ctx, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer root.Close()
+				selector := c.receiptID
+				ref := fmt.Sprintf("refs/swarm/local-completions/issue-%d/%s", f.n, f.b)
+				archive := fmt.Sprintf("archive-issue-%d-%s.json", f.n, selector)
+				m := f.m
+				want := ""
+				if scenario != "active" && scenario != "expired" {
+					if _, err = f.m.Release(ctx, f.n, "local-dev", "end original claim"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				switch scenario {
+				case "active":
+					want = "swarm issue release"
+					f.m.BindClaim(f.n, "old-caller-token")
+					var changed *CompletionInputsChangedError
+					if _, err := f.m.RecoverCheckpointCompletion(ctx, f.n, "local-dev"); !errors.Is(err, ErrClaimFence) || errors.As(err, &changed) {
+						t.Fatalf("wrong token against current receipt: %v", err)
+					}
+					f.m.BindClaim(f.n, c.Claim)
+					if _, err := f.m.mutate(ctx, f.n, "local-dev", func(st *IssueState) error {
+						st.ApprovedBy = "another-maintainer"
+						return nil
+					}); err != nil {
+						t.Fatal(err)
+					}
+				case "expired":
+					want = "establish a successor claim"
+					expired := f.state().Lease.ExpiresAt.Add(time.Second)
+					f.m.SetNowFunc(func() time.Time { return expired })
+				case "wrong selector":
+					want = "no matching pending"
+					selector = strings.Repeat("0", 64)
+				case "unauthorized":
+					want = "not authorized"
+					m = NewManager(f.tr.WithUser("outsider", "NONE"), f.m.security)
+					m.SetStore(f.m.repoRoot, f.m.Store())
+				case "gateway":
+					want = "original direct coordinator checkout"
+					m = NewManager(f.tr, f.m.security)
+					m.SetStore(f.m.repoRoot, f.m.Store())
+					m.SetWorkerGateway(refusingGateway{t: t})
+				case "fork", "pr", "cleanup":
+					raw, rev, err := f.m.Store().Load(ctx, f.n)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var st IssueState
+					if err = json.Unmarshal(raw, &st); err != nil {
+						t.Fatal(err)
+					}
+					switch scenario {
+					case "fork":
+						st.ForkRepo = "elsewhere/repo"
+					case "pr":
+						st.SubmittedHeadSHA = f.a
+					case "cleanup":
+						st.Cleanup = &CleanupReservation{OperationID: "reserved"}
+					}
+					raw, err = json.Marshal(st)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err = f.m.Store().CompareAndSwap(ctx, f.n, rev, raw); err != nil {
+						t.Fatal(err)
+					}
+					want = "cleanup reservation"
+				case "corrupt":
+					want = "invalid completion envelope"
+					err = root.WriteFile(completionName(f.n), []byte("{"), 0600)
+				case "missing candidate":
+					want = "unavailable as a local commit"
+					c.Candidate = strings.Repeat("a", 40)
+					rewriteCompletion(t, f, c)
+					c, err = f.m.InspectCheckpointCompletion(ctx, f.n)
+					if err == nil {
+						selector = c.receiptID
+					}
+				case "bad ref":
+					want = "could not pin"
+					f.git(f.m.repoRoot, "update-ref", ref, f.a)
+				case "archive failure":
+					want = "existing completion archive differs"
+					err = root.WriteFile(archive, []byte("different contents"), 0600)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				raw, err := root.ReadFile(completionName(f.n), completionLimit)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, beforeRev, err := m.Store().Load(ctx, f.n)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := m.ArchiveCheckpointCompletion(ctx, f.n, selector); err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("wanted %q, got %v", want, err)
+				}
+				after, err := root.ReadFile(completionName(f.n), completionLimit)
+				if err != nil || string(after) != string(raw) {
+					t.Fatalf("rejection changed pending receipt: %v", err)
+				}
+				if _, rev, err := m.Store().Load(ctx, f.n); err != nil || rev != beforeRev {
+					t.Fatalf("rejection changed state: %v", err)
+				}
+				if scenario == "archive failure" {
+					if pinned := f.git(f.m.repoRoot, "rev-parse", ref); pinned != f.b {
+						t.Fatalf("partial operation lost candidate: %s", pinned)
+					}
+					if err := root.WriteFileDurable(archive, raw, 0600); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := m.ArchiveCheckpointCompletion(ctx, f.n, selector); err != nil {
+						t.Fatalf("retry with existing pin and matching archive: %v", err)
+					}
+				}
+			})
+		}
+	})
+	for _, scenario := range []string{"released", "revoked", "successor-first-checkpoint", "successor-recorded"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := t.Context()
+			first := scenario == "successor-first-checkpoint"
+			recorded := scenario == "successor-recorded"
+			f := completionFixture(t, false)
+			root, _, err := f.m.completionRoot(ctx, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			c, err := f.m.InspectCheckpointCompletion(ctx, f.n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if first {
+				if err := root.Remove(completionName(f.n)); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := f.m.mutate(ctx, f.n, "local-dev", func(st *IssueState) error { st.HeadSHA = ""; return nil }); err != nil {
+					t.Fatal(err)
+				}
+				f.git(f.m.repoRoot, "push", "origin", ":refs/heads/"+f.branch)
+				if err := f.m.SaveCheckpointCompletion(ctx, f.n, "local-dev", f.base, f.b, c.Artifact); err != nil {
+					t.Fatal(err)
+				}
+				c, err = f.m.InspectCheckpointCompletion(ctx, f.n)
+				if err != nil || c == nil || !c.NoRecordedHead {
+					t.Fatalf("first-checkpoint receipt: %+v %v", c, err)
+				}
+			}
+			if recorded {
+				if _, err := f.m.ReconcileCheckpoint(ctx, f.n, "local-dev", f.a, f.b, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "revoked" {
+				f.m.tracker = &revokeTracker{LocalTracker: f.tr}
+				if _, projectionErr, err := f.m.Revoke(ctx, f.n, "end original claim"); err != nil || projectionErr != nil {
+					t.Fatalf("revoke: %v %v", err, projectionErr)
+				}
+			} else if _, err := f.m.Release(ctx, f.n, "local-dev", "end original claim"); err != nil {
+				t.Fatal(err)
+			}
+			m := NewManager(f.tr, f.m.security)
+			m.SetStore(f.m.repoRoot, coordination.NewGitStore(f.m.repoRoot))
+			if first || recorded {
+				st, err := f.m.Acquire(ctx, f.n, "local-dev", "mock", "implement", time.Hour, 1)
+				if err != nil || st.Lease.ClaimID == c.Claim {
+					t.Fatalf("acquire successor: %v", err)
+				}
+				m.BindClaim(f.n, st.Lease.ClaimID)
+			}
+			raw, err := root.ReadFile(completionName(f.n), completionLimit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			state := f.state()
+			remote := f.git(f.remote, "for-each-ref", "refs/heads/"+f.branch)
+			report, err := os.ReadFile(filepath.Join(f.path, ".swarm/active/IMPLEMENTATION.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := m.ArchiveCheckpointCompletion(ctx, f.n, c.receiptID)
+			if err != nil || out.Candidate != f.b || out.AlreadyRecorded != recorded {
+				t.Fatalf("archive: %+v %v", out, err)
+			}
+			if f.git(f.m.repoRoot, "rev-parse", out.RetentionRef) != f.b ||
+				f.git(f.path, "rev-parse", "HEAD") != f.b || f.git(f.path, "status", "--porcelain") != "" ||
+				f.git(f.m.repoRoot, "rev-parse", "refs/heads/"+f.branch) != f.b ||
+				f.git(f.remote, "for-each-ref", "refs/heads/"+f.branch) != remote || !reflect.DeepEqual(state, f.state()) {
+				t.Fatal("archive changed state, refs, or checkout")
+			}
+			archived, err := root.ReadFile(fmt.Sprintf("archive-issue-%d-%s.json", f.n, c.receiptID), completionLimit)
+			if err != nil || string(archived) != string(raw) {
+				t.Fatalf("archive bytes differ: %v", err)
+			}
+			afterReport, err := os.ReadFile(filepath.Join(f.path, ".swarm/active/IMPLEMENTATION.md"))
+			if err != nil || string(afterReport) != string(report) {
+				t.Fatalf("implementation report changed: %v", err)
+			}
+			if found, err := m.InspectCheckpointCompletion(ctx, f.n); err != nil || found != nil {
+				t.Fatalf("pending completion survived: %+v %v", found, err)
+			}
+			if _, err := m.ArchiveCheckpointCompletion(ctx, f.n, c.receiptID); !errors.Is(err, ErrClaimFence) {
+				t.Fatalf("archive replay: %v", err)
+			}
+			if first {
+				m.BindClaim(f.n, c.Claim)
+				if _, err := m.ReconcileCheckpoint(ctx, f.n, "local-dev", f.base, f.b, false); !errors.Is(err, ErrClaimFence) {
+					t.Fatalf("stale original claim could reconcile: %v", err)
+				}
+				m.BindClaim(f.n, state.Lease.ClaimID)
+				f.review("freshly reviewed predecessor and candidate")
+				preview, err := m.ReconcileCheckpoint(ctx, f.n, "local-dev", f.base, f.b, true)
+				if err != nil || !preview.ValidationRequired || preview.ReviewRequired {
+					t.Fatalf("reconciliation preview: %+v %v", preview, err)
+				}
+				result, err := m.ReconcileCheckpoint(ctx, f.n, "local-dev", f.base, f.b, false)
+				if err != nil || result.State.HeadSHA != f.b || result.State.Lease.ClaimID == c.Claim {
+					t.Fatalf("explicit reconcile: %+v %v", result, err)
+				}
+				tree, err := m.implementationTree(ctx, f.b)
+				if err != nil || tree != c.Tree || VerifyTrustedImplementation(result.State, f.b, tree, f.branch) == nil {
+					t.Fatalf("reconciliation changed the preserved tree or trusted stale implementation: %v", err)
+				}
+				for _, art := range result.State.Artifacts {
+					if art.Type == contract.ArtifactValidation && art.Verdict == "PASS" && art.Metadata["head_sha"] == f.b && art.Metadata["validation_trusted_claim"] == result.State.Lease.ClaimID {
+						return
+					}
+				}
+				t.Fatal("fresh candidate validation missing")
+			}
+			if recorded {
+				replacement := *c
+				replacement.Claim = state.Lease.ClaimID
+				rewriteCompletion(t, f, &replacement)
+				if _, err := m.ArchiveCheckpointCompletion(ctx, f.n, c.receiptID); !errors.Is(err, ErrClaimFence) || !strings.Contains(err.Error(), "no matching pending") {
+					t.Fatalf("old selector matched a replacement: %v", err)
+				}
+				if found, err := m.InspectCheckpointCompletion(ctx, f.n); err != nil || found == nil || found.Claim != replacement.Claim {
+					t.Fatalf("old selector retired another receipt: %+v %v", found, err)
+				}
+			}
+		})
 	}
 }

@@ -1127,3 +1127,28 @@ func TestIssueStatusClaimRecovery(t *testing.T) {
 		}
 	}
 }
+
+func TestNextActionCompletionInputsChanged(t *testing.T) {
+	const localRoot = "/sentinel-local-root"
+	ctx := stopContext{opts: &RootOptions{RepoRoot: localRoot, Repo: "org/repo", UpstreamRemote: "upstream"}, resource: "issue"}
+	cause := &lease.CompletionInputsChangedError{IssueNumber: 7, Candidate: strings.Repeat("a", 40), ReceiptID: strings.Repeat("b", 64)}
+	err := ctx.stop(fmt.Errorf("completion recovery rejected: %w", cause))
+	action := nextActionOf(err)
+	want := []string{"swarm", "--repo", "org/repo", "--upstream-remote", "upstream", "issue", "archive-completion", "7", "--expected-receipt", cause.ReceiptID}
+	if !errors.Is(err, lease.ErrClaimFence) || action == nil || action.Reason != ReasonCompletionInputsChanged || !action.HumanRequired || !reflect.DeepEqual(action.Argv, want) {
+		t.Fatalf("action: %+v, error: %v", action, err)
+	}
+	raw, marshalErr := json.Marshal(action)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	text := err.Error()
+	for _, rendered := range []string{text, string(raw)} {
+		if strings.Contains(rendered, localRoot) || strings.Contains(rendered, "issue work") {
+			t.Fatalf("unexpected retry or local path: %s", rendered)
+		}
+	}
+	if !strings.Contains(text, "original coordinator checkout") || !strings.Contains(text, "Next step: "+formatCommand(want)) {
+		t.Fatalf("missing archive instructions: %s", text)
+	}
+}

@@ -18,13 +18,14 @@ import (
 // Next-action reasons emitted by issue work, issue submit, pr work, pr rebase,
 // and pr submit when they stop short of success.
 const (
-	ReasonClaimExpired          = "claim_expired"
-	ReasonRequiredCheckLimit    = "required_check_limit"
-	ReasonPartialImplementation = "partial_implementation"
-	ReasonChangesRequested      = "changes_requested"
-	ReasonPlanNoProgress        = "plan_no_progress"
-	ReasonNeedsApproval         = "needs_approval"
-	ReasonConflict              = "conflict"
+	ReasonCompletionInputsChanged = "completion_inputs_changed"
+	ReasonClaimExpired            = "claim_expired"
+	ReasonRequiredCheckLimit      = "required_check_limit"
+	ReasonPartialImplementation   = "partial_implementation"
+	ReasonChangesRequested        = "changes_requested"
+	ReasonPlanNoProgress          = "plan_no_progress"
+	ReasonNeedsApproval           = "needs_approval"
+	ReasonConflict                = "conflict"
 	// ReasonPreExistingFailures stops a run whose failing tests all fail at
 	// the approved base; a maintainer inspects the status and decides.
 	ReasonPreExistingFailures = "pre_existing_failures"
@@ -130,6 +131,14 @@ func (c stopContext) classify(err error) *NextAction {
 		}
 		if number > 0 {
 			return &NextAction{Reason: ReasonPartialImplementation, Argv: c.argv(false, "issue", "work", strconv.Itoa(number), "--phase", "plan")}
+		}
+	}
+	var completion *lease.CompletionInputsChangedError
+	if c.resource == "issue" && (c.opts == nil || !c.opts.Fork) && errors.As(err, &completion) {
+		return &NextAction{
+			Reason:        ReasonCompletionInputsChanged,
+			Argv:          c.pathFreeArgv("issue", "archive-completion", strconv.Itoa(completion.IssueNumber), "--expected-receipt", completion.ReceiptID),
+			HumanRequired: true,
 		}
 	}
 	if c.number <= 0 {
@@ -339,7 +348,7 @@ func actionOperation(a *NextAction) (string, string, []string) {
 }
 func isMaintainerAction(a *NextAction) bool {
 	resource, operation, _ := actionOperation(a)
-	return resource == "issue" && (operation == "approve" || operation == "review-plan" || operation == "edit")
+	return resource == "issue" && (operation == "approve" || operation == "review-plan" || operation == "edit" || operation == "archive-completion")
 }
 
 func renderNextAction(a *NextAction) string {
@@ -360,6 +369,9 @@ func renderNextAction(a *NextAction) string {
 	if isMaintainerAction(a) {
 		guidance = "\nAsk an authorized maintainer to run the next step."
 		_, operation, args := actionOperation(a)
+		if operation == "archive-completion" {
+			guidance = "\nAsk an authorized maintainer to run the next step from the original coordinator checkout."
+		}
 		if operation == "review-plan" && slices.Contains(args, "--approve") {
 			guidance = "\nAsk an independent maintainer to review the current plan."
 		}

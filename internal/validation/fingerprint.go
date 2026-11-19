@@ -40,47 +40,72 @@ func Reuse(ctx context.Context, root string, opts ValidateOptions, owner string,
 }
 
 func reuseAt(ctx context.Context, root string, opts ValidateOptions, owner string, artifacts []contract.Artifact, now time.Time) (*ValidationReport, error) {
+	report, _, err := reuseWithReasonAt(ctx, root, opts, owner, artifacts, now)
+	return report, err
+}
+
+// ReuseWithReason returns a fixed diagnostic when validation cannot be reused.
+func ReuseWithReason(ctx context.Context, root string, opts ValidateOptions, owner string, artifacts []contract.Artifact) (*ValidationReport, string, error) {
+	return reuseWithReasonAt(ctx, root, opts, owner, artifacts, time.Now())
+}
+
+func reuseWithReasonAt(ctx context.Context, root string, opts ValidateOptions, owner string, artifacts []contract.Artifact, now time.Time) (*ValidationReport, string, error) {
 	started := time.Now()
-	if opts.ForkMode || opts.CIMode || !reusableVersion(opts.Version) || opts.ClaimID == "" || owner == "" {
-		return nil, nil
+	switch {
+	case opts.ForkMode || opts.CIMode:
+		return nil, "validation reuse is unavailable in this mode", nil
+	case strings.HasSuffix(opts.Version, "+dirty"):
+		return nil, "the CLI build is dirty and ineligible for reuse", nil
+	case !reusableVersion(opts.Version):
+		return nil, "an immutable build version is required", nil
+	case opts.ClaimID == "" || owner == "":
+		return nil, "the current claim identity is unavailable", nil
 	}
 	if _, err := loadTrustedValidationSpecContext(ctx, root, opts.BaseSHA); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	current, err := fingerprint(ctx, root, opts)
 	if err != nil {
 		// Optional reuse must not make ordinary validation depend on being
 		// able to construct a temporary-index fingerprint.
-		return nil, nil
+		return nil, "the candidate identity is unavailable", nil
 	}
 	// Submit publishes the recorded commit, so bind to its actual tree as well
 	// as requiring the current candidate to describe that same tree.
 	committed, err := gitOutput(root, "rev-parse", "--verify", "HEAD^{tree}")
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if current["validation_tree"] != strings.TrimSpace(string(committed)) {
-		return nil, nil
+		return nil, "the candidate tree differs from the checkpoint tree", nil
 	}
 	for i := len(artifacts) - 1; i >= 0; i-- {
 		art := artifacts[i]
 		if art.Type != contract.ArtifactValidation {
 			continue
 		}
-		if ReuseMetadataReason(art, opts.Version, owner, opts.BaseSHA) != "" {
-			return nil, nil
+		if reason := ReuseMetadataReason(art, opts.Version, owner, opts.BaseSHA); reason != "" {
+			return nil, reason, nil
 		}
-		for k, v := range current {
-			if k == "validation_claim" {
-				continue
+		for _, identity := range []struct{ key, changed string }{
+			{"validation_tree", "the candidate tree changed since validation"},
+			{"validation_policy", "the trusted policy changed since validation"},
+			{"validation_base", "approved base differs"},
+			{"validation_version", "build version differs"},
+		} {
+			if current[identity.key] == "" {
+				return nil, "the candidate identity is unavailable", nil
 			}
-			if v == "" || art.Metadata[k] != v {
-				return nil, nil
+			if art.Metadata[identity.key] == "" {
+				return nil, "the recorded validation fingerprint is incomplete", nil
+			}
+			if art.Metadata[identity.key] != current[identity.key] {
+				return nil, identity.changed, nil
 			}
 		}
 		var report ValidationReport
 		if err := json.Unmarshal([]byte(art.Metadata["validation_report"]), &report); err != nil || !report.Passed {
-			return nil, nil
+			return nil, "passing validation report is unavailable", nil
 		}
 		source := art.Metadata["validation_source_time"]
 		if source == "" {
@@ -88,34 +113,37 @@ func reuseAt(ctx context.Context, root string, opts ValidateOptions, owner strin
 		}
 		when, err := time.Parse(time.RFC3339Nano, source)
 		if err != nil || when.After(now) {
-			return nil, nil
+			return nil, "the original validation time is invalid", nil
 		}
 		sourceClaim, hasSourceClaim := art.Metadata["validation_source_claim"]
 		if hasSourceClaim && (sourceClaim == "" || art.Metadata["validation_source_time"] == "") {
-			return nil, nil
+			return nil, "original validation identity is unavailable", nil
 		}
 		if sourceClaim == "" {
 			sourceClaim = art.Metadata["validation_claim"]
 		}
 		if art.Metadata["validation_claim"] != opts.ClaimID && !opts.DirectIssueReuse {
-			return nil, nil
+			return nil, "validation belongs to a different claim", nil
 		}
 		if sourceClaim != opts.ClaimID {
 			if !opts.DirectIssueReuse {
-				return nil, nil
+				return nil, "validation belongs to a different claim", nil
 			}
 			cfg, err := harness.LoadConfigAtContext(ctx, root, opts.BaseSHA)
 			if err != nil {
-				return nil, nil
+				return nil, "the validation reuse age limit is unavailable", nil
 			}
 			_, budget, err := cfg.Lease.ClaimBudget()
-			if err != nil || now.Sub(when) > budget {
-				return nil, nil
+			if err != nil {
+				return nil, "the validation reuse age limit is unavailable", nil
+			}
+			if now.Sub(when) > budget {
+				return nil, "the original validation exceeds the reuse age limit", nil
 			}
 		}
 		head, err := resolveCommit(root, "HEAD")
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		metadata := make(map[string]string, len(art.Metadata)+2)
 		for k, v := range art.Metadata {
@@ -136,11 +164,11 @@ func reuseAt(ctx context.Context, root string, opts ValidateOptions, owner strin
 		}
 		age := now.Sub(when).Round(time.Second)
 		if age < 0 {
-			return nil, nil
+			return nil, "the original validation time is invalid", nil
 		}
 		tree := current["validation_tree"]
 		if len(tree) < 12 {
-			return nil, nil
+			return nil, "the candidate identity is unavailable", nil
 		}
 		message := fmt.Sprintf("Reusing validation from %s (%s ago, tree %s; source head %s, submitted head %s)", source, age, tree[:12], report.HeadSHA, head)
 		message += fmt.Sprintf("; source claim %s; candidate tree %s; policy digest %s", sourceClaim, tree, current["validation_policy"])
@@ -162,9 +190,9 @@ func reuseAt(ctx context.Context, root string, opts ValidateOptions, owner strin
 		art.Metadata["head_sha"] = head
 		report.Artifact = art
 		report.Reused = true
-		return &report, nil
+		return &report, "", nil
 	}
-	return nil, nil
+	return nil, "no trusted passing validation is recorded", nil
 }
 
 // ReuseMetadataReason checks the stable prerequisites without touching Git.

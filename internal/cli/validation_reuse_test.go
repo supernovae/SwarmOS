@@ -6,9 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/supernovae/swarmos/internal/lease"
-	"github.com/supernovae/swarmos/internal/tracker"
-	"github.com/supernovae/swarmos/internal/validation"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,7 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
@@ -61,6 +62,123 @@ func submitWithDiagnostics(t *testing.T, f *cliFixture, args ...string) (string,
 		t.Fatalf("submit: %v %s %s", e, out.String(), diag.String())
 	}
 	return out.String(), diag.String()
+}
+
+func TestDirectIssueWorkSubmitValidationReuse(t *testing.T) {
+	for _, tc := range []struct {
+		name, version, reason string
+		checks                int
+	}{
+		{"eligible", "v1.2.3", "", 1},
+		{"dirty", "v1.2.3+dirty", "the CLI build is dirty and ineligible for reuse", 2},
+		{"edited", "v1.2.3", "the candidate tree changed since validation", 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			old := Version
+			Version = tc.version
+			t.Cleanup(func() { Version = old })
+			f, counter := countedValidationFixture(t)
+			f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'checked\\n' > candidate.txt")
+			f.resolverRunner = func(name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error) {
+				runner, err := agent.NewConfiguredRunnerWithOptions(name, cfg, local, agent.RunnerOptions{LookupEnv: f.env.lookup()})
+				return acceptanceFixtureRunner{runner}, err
+			}
+			n := f.create(t, "agent")
+			number := strconv.Itoa(n)
+			f.must(t, "issue", "approve", number)
+			f.must(t, "issue", "work", number, "--agent", "mock", "--progress=false")
+			source := latestValidation(t, f, n)
+			md := source.Metadata
+			wt := workspace.WorktreePath(f.root, n)
+			head := prGit(t, wt, "rev-parse", "HEAD")
+			tree := prGit(t, wt, "rev-parse", "HEAD^{tree}")
+			claim := f.state(t, n).Lease.ClaimID
+			if source.Verdict != "PASS" || md["validation_trusted_origin"] != "coordinator" ||
+				md["validation_version"] != tc.version || md["validation_claim"] != claim ||
+				md["head_sha"] != head || md["validation_tree"] != tree || md[validation.AcceptanceEvidenceKey] == "" {
+				t.Fatal("work did not record trusted passing checks and tester evidence for its checkpoint")
+			}
+			t.Logf("work checkpoint %s, tree %s", head, tree)
+			if got := checkCount(t, counter); got != 1 {
+				t.Fatalf("work ran the check %d times, want 1", got)
+			}
+			if tc.name == "edited" {
+				prGit(t, wt, "ls-files", "--error-unmatch", "candidate.txt")
+				if err := os.WriteFile(filepath.Join(wt, "candidate.txt"), []byte("edited\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			out, diag, err := runProgressCommand(t, f, "issue", "submit", number, "--json", "--progress=true")
+			if !json.Valid([]byte(out)) {
+				t.Fatalf("invalid JSON stdout: %s", out)
+			}
+			if got := checkCount(t, counter); got != tc.checks {
+				t.Fatalf("total checks = %d, want %d", got, tc.checks)
+			}
+			state := f.state(t, n)
+			submitted := latestValidation(t, f, n)
+			t.Logf("submit checkpoint %s, tree %s", submitted.Metadata["head_sha"], submitted.Metadata["validation_tree"])
+			if submitted.Verdict != "PASS" || submitted.Metadata["validation_claim"] != claim {
+				t.Fatal("submit did not record PASS under the same claim")
+			}
+			if tc.reason != "" {
+				if submitted.Metadata["validation_reused"] == "true" {
+					t.Fatal("submit recorded reuse after running fresh checks")
+				}
+				for _, line := range strings.Split(diag, "\n") {
+					if strings.HasPrefix(line, "Running required checks:") && (strings.Contains(line, f.root) || strings.Contains(line, wt) || strings.Contains(line, counter) || strings.Contains(line, tc.version)) {
+						t.Errorf("notice disclosed fixture data: %q", line)
+					}
+				}
+				assertProgressOrder(t, diag, "Running required checks: "+tc.reason+"\n", `Check "counted" started`)
+			}
+			if tc.name == "edited" {
+				if err == nil || !strings.Contains(err.Error(), "acceptance evidence blocks") || state.PRNumber != 0 ||
+					submitted.Metadata["head_sha"] == head || submitted.Metadata["validation_tree"] == tree {
+					t.Fatalf("edited submit did not record the changed candidate and refuse stale evidence: %v", err)
+				}
+				return
+			}
+			if err != nil || state.PRNumber == 0 {
+				t.Fatalf("submit did not create a draft PR: %v\n%s", err, diag)
+			}
+			pr, err := f.tracker.GetPullRequest(t.Context(), state.PRNumber)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !pr.Draft || submitted.Metadata["head_sha"] != head || submitted.Metadata["validation_tree"] != tree {
+				t.Fatal("submission did not preserve the work checkpoint in a draft PR")
+			}
+			checkStatus := "PASS"
+			if tc.name == "eligible" {
+				checkStatus = "REUSED"
+				if !strings.Contains(diag, "Reusing validation") || submitted.Metadata["validation_reused"] != "true" {
+					t.Fatalf("missing reuse evidence: %s", diag)
+				}
+				for _, want := range []string{
+					"Source head: " + head + ";",
+					"Original validation time: " + source.CreatedAt.Format(time.RFC3339Nano) + "; source claim: " + claim + "; candidate tree: " + tree,
+				} {
+					if !strings.Contains(pr.Body, want) {
+						t.Errorf("draft PR missing %q", want)
+					}
+				}
+			} else if !strings.Contains(pr.Body, "reused: false") {
+				t.Error("draft PR missing fresh check evidence")
+			}
+			foundCheck := false
+			for _, line := range strings.Split(pr.Body, "\n") {
+				if strings.HasPrefix(line, "| counted |") && strings.Contains(line, "| "+checkStatus+" |") {
+					foundCheck = true
+					break
+				}
+			}
+			if !foundCheck {
+				t.Errorf("draft PR missing counted check with status %s", checkStatus)
+			}
+		})
+	}
 }
 
 func TestIssueSubmitValidationReuse(t *testing.T) {

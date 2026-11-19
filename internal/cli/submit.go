@@ -212,8 +212,11 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			p.Next("validation")
 			validationOpts := validation.ValidateOptions{DirectIssueReuse: !rootOpts.Fork && !manager.HasWorkerGateway(), Version: Version, ClaimID: state.Lease.ClaimID, OnProgress: p.Observe, BaseSHA: state.BaseSHA, ForkMode: rootOpts.Fork || manager.HasWorkerGateway(), LookupEnv: rootOpts.lookupEnv, DependencyPolicy: rootOpts.dependencyPolicy(worktree)}
 			acceptanceBefore, _ := validation.AcceptanceCandidateIdentity(ctx, worktree, validationOpts)
-			report, valErr := validation.Reuse(ctx, worktree, validationOpts, owner, state.Artifacts)
+			report, reason, valErr := validation.ReuseWithReason(ctx, worktree, validationOpts, owner, state.Artifacts)
 			if valErr == nil && report == nil {
+				if validationOpts.DirectIssueReuse {
+					fmt.Fprintln(cmd.ErrOrStderr(), "Running required checks: "+reason)
+				}
 				report, valErr = validation.Validate(ctx, worktree, unit, validationOpts)
 			}
 			writeValidationSkipNotice(cmd, report)

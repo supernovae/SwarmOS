@@ -329,6 +329,7 @@ func doctorBrowserProfileCheck(ctx context.Context, cfg *contract.SwarmConfig, p
 }
 
 func doctorReadiness(ctx context.Context, repo string, cfg *contract.SwarmConfig, local bool, opts *RootOptions, report *sandbox.ReadinessReport) (resultErr error) {
+	defer func() { report.RefreshOutcome(resultErr) }()
 	projects, err := sandbox.DiscoverReadiness(ctx, repo, "")
 	if err != nil || len(projects) == 0 {
 		return err
@@ -362,7 +363,7 @@ func doctorReadiness(ctx context.Context, repo string, cfg *contract.SwarmConfig
 					continue
 				}
 				switch row.Ecosystem {
-				case "node", "go", "rust":
+				case "node", "go", "rust", "python":
 					hasCache := false
 					for _, cache := range deps.Caches {
 						hasCache = hasCache || cache.Ecosystem == row.Ecosystem

@@ -65,11 +65,11 @@ func TestDryRunReportsIsolationBlockersWithoutClaim(t *testing.T) {
 	if result.Plan.Execution.Mode != contract.ExecutionIsolated || result.Plan.Execution.Backend != contract.BackendNative || len(result.Plan.Blockers) == 0 {
 		t.Fatalf("missing default boundary diagnostics: %+v", result.Plan)
 	}
-	if result.Plan.Readiness == nil || len(result.Plan.Readiness.Rows) == 0 || result.Plan.Readiness.Input != "approved base "+result.Plan.BaseSHA {
+	if result.Plan.Readiness == nil || len(result.Plan.Readiness.Rows) == 0 || result.Plan.Readiness.Input != "approved base "+result.Plan.BaseSHA || result.Plan.Readiness.Outcome != "unverified" {
 		t.Fatalf("missing approved readiness report: %+v", result.Plan.Readiness)
 	}
 	for _, row := range result.Plan.Readiness.Rows {
-		if row.Status != "unverified" {
+		if row.Status != "unverified" || row.Required {
 			t.Fatalf("dry-run executed a probe: %+v", row)
 		}
 	}

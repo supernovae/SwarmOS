@@ -20,8 +20,9 @@ import (
 const maxReadinessInput = 4 << 20
 
 type ReadinessReport struct {
-	Input string         `json:"input"`
-	Rows  []ReadinessRow `json:"rows"`
+	Input   string         `json:"input"`
+	Outcome string         `json:"outcome"`
+	Rows    []ReadinessRow `json:"rows"`
 }
 
 type ReadinessRow struct {
@@ -35,13 +36,30 @@ type ReadinessRow struct {
 	Status    string `json:"status"`
 	Observed  string `json:"observed,omitempty"`
 	Reason    string `json:"reason"`
+	Required  bool   `json:"required"`
+}
+
+// RefreshOutcome summarizes the observations and any boundary failure.
+func (r *ReadinessReport) RefreshOutcome(err error) {
+	r.Outcome = "ready"
+	if err != nil {
+		r.Outcome = "blocked"
+	}
+	for _, row := range r.Rows {
+		if row.Status == "failed" || (row.Required && row.Status == "unverified") {
+			r.Outcome = "blocked"
+		} else if row.Status == "unverified" && r.Outcome == "ready" {
+			r.Outcome = "unverified"
+		}
+	}
 }
 
 type ReadinessProject struct {
-	Directory string
-	Ecosystem string
-	Source    string
-	inputs    map[string][]byte
+	Directory     string
+	Ecosystem     string
+	Source        string
+	inputs        map[string][]byte
+	workspaceRoot string
 }
 
 func readinessEcosystem(name string) string {
@@ -52,8 +70,17 @@ func readinessEcosystem(name string) string {
 		return "go"
 	case "Cargo.toml", "rust-toolchain", "rust-toolchain.toml":
 		return "rust"
+	case "pyproject.toml", "uv.lock", ".python-version":
+		return "python"
+	case "pom.xml":
+		return "maven"
+	case "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "gradle.lockfile":
+		return "gradle"
 	case "global.json":
 		return "dotnet"
+	}
+	if ok, _ := path.Match("requirements*.txt", path.Base(name)); ok {
+		return "python"
 	}
 	switch path.Ext(name) {
 	case ".csproj", ".fsproj", ".vbproj":
@@ -76,13 +103,20 @@ func DiscoverReadiness(ctx context.Context, root, base string) ([]ReadinessProje
 			return fmt.Errorf("invalid readiness input path %q", name)
 		}
 		dir := path.Dir(name)
+		wrapper := path.Base(name) == "gradle-wrapper.properties" && path.Base(dir) == "wrapper" && path.Base(path.Dir(dir)) == "gradle"
+		if wrapper {
+			dir = path.Dir(path.Dir(dir))
+		}
 		for _, part := range strings.Split(dir, "/") {
 			switch part {
-			case ".git", ".swarm", "node_modules", "vendor", "testdata":
+			case ".git", ".swarm", "node_modules", "vendor", "testdata", ".venv", ".gradle":
 				return nil
 			}
 		}
 		eco := readinessEcosystem(name)
+		if wrapper {
+			eco = "gradle"
+		}
 		if readinessProbeInput(name) {
 			data, err := read()
 			if err != nil {
@@ -121,7 +155,7 @@ func DiscoverReadiness(ctx context.Context, root, base string) ([]ReadinessProje
 			if entry.IsDir() {
 				if name != root {
 					switch entry.Name() {
-					case ".git", ".swarm", "node_modules", "vendor", "testdata":
+					case ".git", ".swarm", "node_modules", "vendor", "testdata", ".venv", ".gradle":
 						return filepath.SkipDir
 					}
 				}
@@ -198,12 +232,20 @@ func DiscoverReadiness(ctx context.Context, root, base string) ([]ReadinessProje
 type ReadinessExecutor func(context.Context, string, string, io.Writer, io.Writer) error
 
 type readinessOutput struct {
-	data []byte
+	data      []byte
+	limit     int
+	truncated bool
 }
 
 func (w *readinessOutput) Write(p []byte) (int, error) {
 	n := len(p)
-	if room := 4096 - len(w.data); room > 0 {
+	limit := w.limit
+	if limit == 0 {
+		limit = 4096
+	}
+	room := limit - len(w.data)
+	w.truncated = w.truncated || n > room
+	if room > 0 {
 		w.data = append(w.data, p[:min(n, room)]...)
 	}
 	return n, nil
@@ -215,7 +257,6 @@ func CheckReadiness(ctx context.Context, projects []ReadinessProject, role, agen
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 	var rows []ReadinessRow
-	var firstFailure error
 	var dir string
 	if run != nil && len(projects) > 0 {
 		var err error
@@ -230,7 +271,7 @@ func CheckReadiness(ctx context.Context, projects []ReadinessProject, role, agen
 		if err := ctx.Err(); err != nil {
 			return rows, fmt.Errorf("%s project readiness: %w", role, err)
 		}
-		row := ReadinessRow{Role: role, Agent: agent, Boundary: boundary, Project: project.Directory, Ecosystem: project.Ecosystem, Check: "toolchain", Source: project.Source, Status: "unverified", Reason: deferred}
+		row := ReadinessRow{Role: role, Agent: agent, Boundary: boundary, Project: project.Directory, Ecosystem: project.Ecosystem, Check: "toolchain", Source: project.Source, Status: "unverified", Reason: deferred, Required: run != nil}
 		if run != nil {
 			if prior, ok := observed[project.Ecosystem]; ok {
 				row.Status, row.Observed, row.Reason = prior.Status, prior.Observed, prior.Reason
@@ -253,40 +294,68 @@ func CheckReadiness(ctx context.Context, projects []ReadinessProject, role, agen
 				observed[project.Ecosystem] = row
 			}
 		}
-		var unsupported string
 		if row.Status == "passed" && project.Ecosystem == "node" {
 			source, reason, pass := readinessNodeVersion(project, row.Observed)
 			if !pass {
-				row.Source, row.Reason, row.Status = source, reason, "failed"
+				row.Source, row.Reason, row.Status = source, fmt.Sprintf("%s (observed %q)", reason, row.Observed), "failed"
 			} else if strings.HasPrefix(reason, "unsupported") {
-				unsupported = reason
+				row.Source, row.Status = source, "unverified"
+				row.Reason = reason + "; declare a supported numeric Node engine range"
 			}
 		}
-		if row.Status == "failed" && firstFailure == nil {
-			firstFailure = fmt.Errorf("%s readiness for %s (%s): %s", role, project.Directory, project.Source, row.Reason)
+		requirements := row
+		requirements.Check = "requirements"
+		requirements.Status, requirements.Observed = "unverified", ""
+		if run == nil {
+			rows = append(rows, requirements, row)
+			continue
 		}
-		unverified := row
-		unverified.Check = "requirements"
-		unverified.Status, unverified.Observed = "unverified", ""
-		if run != nil {
-			unverified.Reason = "project version constraints and dependency declarations require further inspection"
-			if row.Status == "passed" {
-				unverified = checkReadinessDependencies(ctx, project, unverified, run)
-				if unsupported != "" && unverified.Status == "passed" {
-					unverified.Status, unverified.Reason = "unverified", unsupported+"; offline package check passed"
-				}
+		requirements.Reason = "dependency checks require a verified toolchain"
+		requirements.Required = row.Status == "passed"
+		if row.Status == "passed" && project.Ecosystem == "node" && project.workspaceRoot == "" {
+			manager := checkReadinessNodeManager(ctx, project, row, dir, run)
+			if manager.Status != "passed" {
+				requirements.Reason = "locked package checks require the selected package manager"
+				requirements.Required = false
+				rows = append(rows, manager, requirements, row)
+				continue
+			}
+			rows = append(rows, manager)
+		}
+		if row.Status == "passed" {
+			if project.Ecosystem == "node" && project.workspaceRoot != "" {
+				requirements.Required = false
+				requirements.Status = "passed"
+				requirements.Reason = "locked packages are checked at workspace root " + project.workspaceRoot
+			} else {
+				requirements = checkReadinessDependencies(ctx, project, requirements, run)
 			}
 		}
-		if unverified.Status == "failed" && firstFailure == nil {
-			firstFailure = fmt.Errorf("%s readiness for %s (%s): %s", role, project.Directory, unverified.Source, unverified.Reason)
-		}
-		rows = append(rows, unverified, row)
+		rows = append(rows, requirements, row)
 	}
-	return rows, firstFailure
+	for _, row := range rows {
+		if row.Status == "failed" {
+			return rows, readinessCheckError(row)
+		}
+	}
+	for _, row := range rows {
+		if row.Required && row.Status == "unverified" {
+			return rows, readinessCheckError(row)
+		}
+	}
+	return rows, nil
+}
+
+func readinessCheckError(row ReadinessRow) error {
+	return fmt.Errorf("%s readiness for %s (%s): %s", row.Role, row.Project, row.Source, row.Reason)
+
 }
 
 var readinessCommands = map[string]string{
-	"node":   "command -v node && node --version",
+	"node":   "command -v node && node --version && node -e 'process.exit(0)'",
+	"python": "python3 -I --version",
+	"maven":  "java -version 2>&1 && mvn --version",
+	"gradle": "java -version 2>&1 && gradle --version",
 	"go":     "command -v go && GOTOOLCHAIN=local go version",
 	"rust":   "command -v cargo && cargo --version && rustc --version",
 	"dotnet": "command -v dotnet && dotnet --version",

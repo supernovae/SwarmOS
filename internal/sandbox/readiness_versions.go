@@ -98,10 +98,17 @@ func readinessNodeVersion(project ReadinessProject, observed string) (string, st
 	var manifest struct {
 		Engines struct{ Node string }
 	}
-	if data, ok := project.inputs[source]; !ok || json.Unmarshal(data, &manifest) != nil || manifest.Engines.Node == "" {
+	data, ok := project.inputs[source]
+	if !ok {
 		return "", "", true
 	}
-	_, version, _ := strings.Cut(observed, "\n")
+	if json.Unmarshal(data, &manifest) != nil {
+		return source, "unsupported Node manifest or engines declaration", true
+	}
+	if manifest.Engines.Node == "" {
+		return "", "", true
+	}
+	version := observed[strings.LastIndex(observed, "\n")+1:]
 	pass, supported := checkNodeRange(version, manifest.Engines.Node)
 	if !supported {
 		return source, "unsupported Node engine constraint " + manifest.Engines.Node, true

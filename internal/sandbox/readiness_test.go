@@ -41,18 +41,25 @@ func TestReadinessMixedApprovedBase(t *testing.T) {
 	}
 	git("init", "-q")
 	writeReadinessFixture(t, root, map[string]string{
-		"web/package.json":      `{"name":"web","version":"1.0.0"}`,
-		"service/go.mod":        "module example.com/service\ngo 1.25\n",
-		"cli/Cargo.toml":        "[package]\nname='fixture'\nversion='0.1.0'\n",
-		"sdk/global.json":       `{"sdk":{"version":"8.0.100"}}`,
-		"native/CMakeLists.txt": "project(fixture LANGUAGES C CXX)\n",
+		"web/package.json":                                `{"name":"web","version":"1.0.0"}`,
+		"service/go.mod":                                  "module example.com/service\ngo 1.25\n",
+		"cli/Cargo.toml":                                  "[package]\nname='fixture'\nversion='0.1.0'\n",
+		"sdk/global.json":                                 `{"sdk":{"version":"8.0.100"}}`,
+		"native/CMakeLists.txt":                           "project(fixture LANGUAGES C CXX)\n",
+		"python/.python-version":                          "3.11\n",
+		"python/requirements.txt":                         "wheel==0.45.1\n",
+		"maven/pom.xml":                                   "<project/>",
+		"gradle/build.gradle.kts":                         "",
+		"gradle/gradle.lockfile":                          "example:fixture:1.2.3=runtimeClasspath\n",
+		"gradle/gradle/wrapper/gradle-wrapper.properties": "distributionUrl=https://example.invalid/gradle-8.10-bin.zip\n",
 	})
 	git("add", ".")
 	git("-c", "user.name=Readiness", "-c", "user.email=readiness@example.com", "commit", "-qm", "approved")
 	base := git("rev-parse", "HEAD")
 	writeReadinessFixture(t, root, map[string]string{
-		"web/package.json": `{"name":"dirty","version":"1.0.0"}`,
-		"dirty/go.mod":     "module example.com/dirty\n",
+		"web/package.json":        `{"name":"dirty","version":"1.0.0"}`,
+		"dirty/go.mod":            "module example.com/dirty\n",
+		"python/requirements.txt": "dirty-package==2.0\n",
 	})
 	ctx := context.Background()
 	approved, err := DiscoverReadiness(ctx, root, base)
@@ -68,18 +75,21 @@ func TestReadinessMixedApprovedBase(t *testing.T) {
 		ecosystems = append(ecosystems, project.Ecosystem)
 	}
 	slices.Sort(ecosystems)
-	if !slices.Equal(ecosystems, []string{"c", "cpp", "dotnet", "go", "node", "rust"}) || len(checkout) != len(approved)+1 {
+	if !slices.Equal(ecosystems, []string{"c", "cpp", "dotnet", "go", "gradle", "maven", "node", "python", "rust"}) || len(checkout) != len(approved)+1 {
 		t.Fatalf("approved=%+v checkout=%+v", approved, checkout)
 	}
 	if strings.Contains(string(approved[0].inputs["web/package.json"]), "dirty") {
 		t.Fatal("approved tree used dirty manifest")
 	}
+	if string(approved[0].inputs["python/requirements.txt"]) != "wheel==0.45.1\n" || string(checkout[0].inputs["python/requirements.txt"]) != "dirty-package==2.0\n" {
+		t.Fatal("requirements inspection used the wrong input")
+	}
 	rows, err := CheckReadiness(ctx, approved, "developer", "codex", "codex-native", "dry-run", nil)
-	if err != nil || len(rows) != 12 {
+	if err != nil || len(rows) != 2*len(approved) {
 		t.Fatalf("rows=%+v err=%v", rows, err)
 	}
 	for _, row := range rows {
-		if row.Status != "unverified" || row.Reason != "dry-run" {
+		if row.Status != "unverified" || row.Reason != "dry-run" || row.Required {
 			t.Fatalf("unexpected inspection row %+v", row)
 		}
 	}
@@ -95,7 +105,7 @@ func TestReadinessOfflineDependencies(t *testing.T) {
 			}
 			lib := t.TempDir()
 			writeReadinessFixture(t, lib, map[string]string{
-				"fixture.h": "extern int fixture(void);\n",
+				"fixture.h": "extern int fixture(void);\n__attribute__((used)) static int (*fixture_link)(void) = fixture;\n",
 				"fixture.c": "int fixture(void) { return 1; }\n",
 			})
 			for _, command := range [][]string{{tc.compiler, "-c", "fixture.c", "-o", "fixture.o"}, {"ar", "rcs", "libfixture.a", "fixture.o"}} {
@@ -228,43 +238,107 @@ func TestReadinessOfflineDependenciesRust(t *testing.T) {
 	assertNoSentinels(t, fixture.sentinels)
 }
 
+func readinessRow(t *testing.T, rows []ReadinessRow, check string) ReadinessRow {
+	t.Helper()
+	for _, row := range rows {
+		if row.Check == check {
+			return row
+		}
+	}
+	t.Fatalf("missing %s row in %+v", check, rows)
+	return ReadinessRow{}
+}
+
 func TestReadinessOfflineDependenciesNode(t *testing.T) {
 	requireNpm(t)
-	markers, cache, project := t.TempDir(), t.TempDir(), t.TempDir()
+	if output, err := exec.Command("node", "--version").Output(); err != nil {
+		t.Skipf("Node fixture: %v", err)
+	} else if ok, _ := checkNodeRange(string(output), ">=24"); !ok {
+		t.Skipf("fixture needs Node >=24, found %s", output)
+	}
+	_, hostCaches := hostNodeEnv(t)
+	markers := resolvedTempDir(t)
 	pkg := hookPackage(t, markers)
 	pkg.build(t)
 	tarball := filepath.Join(t.TempDir(), "hook.tgz")
 	if err := os.WriteFile(tarball, pkg.tarball, 0600); err != nil {
 		t.Fatal(err)
 	}
-	root := packageJSON(t, nil, "hook@1.0.0")
+	manifest := packageJSON(t, map[string]any{
+		"engines": map[string]string{"node": ">=24"},
+		"scripts": map[string]string{"preinstall": markerScript(markers, "root-preinstall")},
+	}, "hook@1.0.0")
 	lock := fmt.Sprintf(`{"name":"fixture","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"fixture","version":"1.0.0","dependencies":{"hook":"1.0.0"}},"node_modules/hook":{"version":"1.0.0","resolved":"https://registry.invalid/hook.tgz","integrity":%q,"hasInstallScript":true}}}`, pkg.integrity())
-	writeReadinessFixture(t, project, map[string]string{"package.json": root, "package-lock.json": lock})
-	var stdout, stderr readinessOutput
-	run := localReadinessExecutor(t, "npm_config_cache="+cache)
-	if err := run(t.Context(), filepath.Dir(tarball), "npm cache add --ignore-scripts ./hook.tgz", &stdout, &stderr); err != nil {
-		t.Fatalf("seed npm cache: %v: %s", err, stderr.data)
+	repo, base := nodeRepo(t, map[string]string{"package.json": manifest, "package-lock.json": lock})
+	sourceRunner := runPrefetchCommand
+	t.Cleanup(func() { runPrefetchCommand = sourceRunner })
+	runPrefetchCommand = func(ctx context.Context, dir string, env, argv []string) ([]byte, []byte, error) {
+		if !slices.Equal(argv, []string{"npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"}) {
+			t.Fatalf("unexpected preparation command: %v", argv)
+		}
+		if out, diagnostics, err := sourceRunner(ctx, dir, env, []string{"npm", "cache", "add", "--ignore-scripts", tarball}); err != nil {
+			t.Fatalf("seed integrity-addressed fixture: %v %s %s", err, out, diagnostics)
+		}
+		return sourceRunner(ctx, dir, append(env, "npm_config_offline=true"), argv)
 	}
-	if err := os.Remove(tarball); err != nil {
-		t.Fatal(err)
+	deps, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, resolvedTempDir(t), PerRepository)
+	if err != nil || len(deps.Caches) != 1 {
+		t.Fatalf("preparation: %+v, %v", deps, err)
 	}
-	projects, err := DiscoverReadiness(t.Context(), project, "")
+	projects, err := DiscoverReadiness(t.Context(), repo, base)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, present := range []bool{true, false} {
-		store := cache
-		if !present {
-			store = t.TempDir()
+	store := filepath.Join(deps.Caches[0].Dir, "npm")
+	for _, role := range []string{"developer", "tester"} {
+		for _, present := range []bool{true, false} {
+			mount := store
+			if !present {
+				mount = t.TempDir()
+			}
+			run := localReadinessExecutor(t, "npm_config_cache="+mount)
+			check := func(ctx context.Context, dir, command string, out, diagnostics io.Writer) error {
+				err := run(ctx, dir, command, out, diagnostics)
+				if err == nil && strings.Contains(command, "npm ci") {
+					_, err = os.Stat(filepath.Join(dir, "node_modules", "hook", "package.json"))
+				}
+				return err
+			}
+			rows, err := CheckReadiness(t.Context(), projects, role, "fixture", "local offline npm", "", check)
+			req := readinessRow(t, rows, "requirements")
+			if (err == nil) != present || readinessRow(t, rows, "package-manager").Status != "passed" || req.Source != "package-lock.json" ||
+				(!present && (!strings.Contains(req.Reason, "hook.tgz") || req.Status != "failed")) {
+				t.Fatalf("role=%s present=%t rows=%+v err=%v", role, present, rows, err)
+			}
 		}
-		rows, err := CheckReadiness(t.Context(), projects, "developer", "fixture", "fixture", "", localReadinessExecutor(t, "npm_config_cache="+store))
-		if (err == nil) != present || rows[1].Status != "passed" {
-			t.Fatalf("present=%t rows=%+v err=%v", present, rows, err)
-		}
-		t.Log(rows[1].Observed)
 	}
 	if entries, err := os.ReadDir(markers); err != nil || len(entries) != 0 {
-		t.Fatalf("offline readiness ran lifecycle scripts: %v (%v)", entries, err)
+		t.Fatalf("preparation or offline readiness ran lifecycle scripts: %v (%v)", entries, err)
+	}
+	for _, input := range []struct{ path, want string }{{"package.json", manifest}, {"package-lock.json", lock}} {
+		if data, err := os.ReadFile(filepath.Join(repo, input.path)); err != nil || string(data) != input.want {
+			t.Fatalf("preparation changed %s: %v", input.path, err)
+		}
+	}
+	for _, cache := range hostCaches {
+		if entries, err := os.ReadDir(cache); err != nil || len(entries) != 0 {
+			t.Fatalf("host cache changed: %v (%v)", entries, err)
+		}
+	}
+
+	// Verify that the fixture would detect execution of the lifecycle hooks.
+	control := resolvedTempDir(t)
+	writeReadinessFixture(t, control, map[string]string{"package.json": manifest, "package-lock.json": lock})
+	var stdout, stderr readinessOutput
+	run := localReadinessExecutor(t, "npm_config_cache="+store)
+	if err := run(t.Context(), control, "npm ci --offline --no-audit --no-fund --ignore-scripts=false", &stdout, &stderr); err != nil {
+		t.Fatalf("scripts-enabled control: %v (%s)", err, stderr.data)
+	}
+	if _, err := os.Stat(filepath.Join(markers, "root-preinstall")); err != nil {
+		t.Fatalf("scripts-enabled control wrote no root marker: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(markers, "hook-install")); err != nil {
+		t.Fatalf("scripts-enabled control wrote no package marker: %v", err)
 	}
 }
 
@@ -412,6 +486,14 @@ func TestReadinessRoleBoundaryPolicies(t *testing.T) {
 	}
 	t.Setenv("CODEX_HOME", "/secret/provider-home")
 	t.Setenv("SWARM_GITHUB_TOKEN", "coordinator-secret")
+	home := resolvedTempDir(t)
+	t.Setenv("HOME", home)
+	maven, gradle := filepath.Join(home, ".m2", "repository"), filepath.Join(home, ".gradle", "caches")
+	for _, dir := range []string{maven, gradle} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	repo, work, cache := t.TempDir(), t.TempDir(), t.TempDir()
 	deps := Dependencies{Caches: []DependencyCache{{Ecosystem: "go", EnvKey: "GOMODCACHE", Dir: cache}}}
 	argv := strings.Join(codexPolicy("/usr/bin/fixture-codex", work, repo, false, nil, deps), "\n")
@@ -436,6 +518,12 @@ func TestReadinessRoleBoundaryPolicies(t *testing.T) {
 	}
 	if strings.Contains(bwrap, "coordinator-secret") || strings.Contains(bwrap, "/secret/provider-home") {
 		t.Fatalf("delegated tool got host credentials %s", bwrap)
+	}
+	for _, store := range []struct{ key, dir string }{{"SWARM_MAVEN_REPOSITORY", maven}, {"SWARM_GRADLE_CACHES", gradle}} {
+		if !strings.Contains(argv, strconv.Quote(store.dir)+`="read"`) || !strings.Contains(argv, store.key+"="+strconv.Quote(store.dir)) ||
+			!containsRun(flags, []string{"--ro-bind", store.dir, store.dir}) || !containsRun(flags, []string{"--setenv", store.key, store.dir}) {
+			t.Fatalf("selected store %s is not mounted read-only in both policies", store.key)
+		}
 	}
 }
 
@@ -484,6 +572,171 @@ func TestReadinessBoundaryExecution(t *testing.T) {
 			}
 			if source := mustReadReadinessFixture(t, filepath.Join(work, "source")); string(source) != "untouched" {
 				t.Fatalf("probe changes escaped the disposable workspace: %s", source)
+			}
+		})
+	}
+}
+
+func TestReadinessNodeManagerDiagnostics(t *testing.T) {
+	root := t.TempDir()
+	writeReadinessFixture(t, root, map[string]string{
+		"package.json":      `{"engines":{"node":">=24"},"packageManager":"npm@11.0.0"}`,
+		"package-lock.json": `{"lockfileVersion":3}`,
+	})
+	projects, err := DiscoverReadiness(t.Context(), root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ version, check, cause string }{
+		{"v22.2.0", "toolchain", "Node >=24"},
+		{"v24.1.0", "package-manager", "install npm 11.0.0"},
+	} {
+		t.Run(tc.version, func(t *testing.T) {
+			rows, err := CheckReadiness(t.Context(), projects, "tester", "fixture", "fixture", "", func(_ context.Context, _, command string, out, _ io.Writer) error {
+				switch {
+				case strings.Contains(command, "node --version"):
+					_, err := fmt.Fprintln(out, "/bin/node\n"+tc.version)
+					return err
+				case strings.Contains(command, "npm --version"):
+					return fmt.Errorf("npm is missing")
+				default:
+					t.Fatalf("unexpected command %q", command)
+					return nil
+				}
+			})
+			row := readinessRow(t, rows, tc.check)
+			if err == nil || row.Status != "failed" || row.Source != "package.json" || !strings.Contains(row.Reason, tc.cause) {
+				t.Fatalf("row=%+v err=%v", row, err)
+			}
+		})
+	}
+}
+
+func TestReadinessOfflineDependenciesPython(t *testing.T) {
+	requirePipDownload(t)
+	t.Setenv("PIP_INDEX_URL", writePythonIndex(t, resolvedTempDir(t), map[string]map[string][]byte{
+		"needed": {"needed-1.0-py3-none-any.whl": testWheel(t, "needed", "1.0")},
+	}))
+	repo, base := pythonRepo(t, map[string]string{
+		"requirements.txt": "needed==1.0\n",
+		"pyproject.toml":   "[project]\nrequires-python = '>=3.8'\n",
+	})
+	deps, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, resolvedTempDir(t), PerRepository)
+	if err != nil || len(deps.Caches) != 1 {
+		t.Fatalf("wheel preparation: %+v, %v", deps, err)
+	}
+	projects, err := DiscoverReadiness(t.Context(), repo, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		store, status, reason string
+	}{
+		{deps.Caches[0].Dir, "passed", "succeeded"},
+		{t.TempDir(), "failed", "needed==1.0"},
+		{"", "unverified", "set PIP_FIND_LINKS"},
+	} {
+		rows, err := CheckReadiness(t.Context(), projects, "tester", "fixture", "offline pip", "", localReadinessExecutor(t, "PIP_FIND_LINKS="+tc.store))
+		req := readinessRow(t, rows, "requirements")
+		if (err == nil) != (tc.status == "passed") || req.Status != tc.status || !strings.Contains(req.Reason, tc.reason) {
+			t.Fatalf("rows=%+v err=%v", rows, err)
+		}
+	}
+	writeReadinessFixture(t, repo, map[string]string{"requirements.txt": "-e .\n"})
+	projects, err = DiscoverReadiness(t.Context(), repo, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := CheckReadiness(t.Context(), projects, "tester", "fixture", "offline pip", "", localReadinessExecutor(t))
+	req := readinessRow(t, rows, "requirements")
+	if err == nil || req.Status != "unverified" || !req.Required || req.Source != "requirements.txt" {
+		t.Fatalf("unsupported requirement: %+v, %v", req, err)
+	}
+}
+
+func TestReadinessOfflineDependenciesJava(t *testing.T) {
+	for _, tc := range []struct {
+		ecosystem, manager, version, storeEnv, missing string
+		files                                          map[string]string
+		store                                          map[string]string
+	}{
+		{"maven", "mvn", "Apache Maven 3.9.9", "SWARM_MAVEN_REPOSITORY", "org.example:library:1.0", map[string]string{
+			"pom.xml": "<project><dependencies><dependency><groupId>org.example</groupId><artifactId>library</artifactId><version>1.0</version></dependency></dependencies></project>",
+		}, map[string]string{
+			"org/example/library/1.0/library-1.0.pom": "<project/>",
+			"org/example/library/1.0/library-1.0.jar": "jar",
+		}},
+		{"gradle", "gradle", "Gradle 8.10", "SWARM_GRADLE_CACHES", "org.example:library:1.0", map[string]string{
+			"build.gradle.kts":                         "",
+			"gradle.lockfile":                          "org.example:library:1.0=runtimeClasspath\n",
+			"gradle/wrapper/gradle-wrapper.properties": "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.10-bin.zip\n",
+		}, map[string]string{
+			"modules-2/files-2.1/org.example/library/1.0/hash/library-1.0.jar": "jar",
+		}},
+	} {
+		t.Run(tc.ecosystem, func(t *testing.T) {
+			root, bin, store := t.TempDir(), t.TempDir(), t.TempDir()
+			writeReadinessFixture(t, root, tc.files)
+			writeReadinessFixture(t, store, tc.store)
+			writeReadinessFixture(t, bin, map[string]string{
+				"java":     "#!/bin/sh\nprintf '%s\\n' 'openjdk version 21.0.4' >&2\n",
+				tc.manager: "#!/bin/sh\nprintf '%s\\n' '" + tc.version + "'\n",
+			})
+			for _, name := range []string{"java", tc.manager} {
+				if err := os.Chmod(filepath.Join(bin, name), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			projects, err := DiscoverReadiness(t.Context(), root, "")
+			if err != nil || len(projects) != 1 {
+				t.Fatalf("projects=%+v err=%v", projects, err)
+			}
+			for _, present := range []bool{true, false} {
+				visible := store
+				if !present {
+					visible = t.TempDir()
+				}
+				run := localReadinessExecutor(t, "PATH="+bin+":/usr/bin:/bin", tc.storeEnv+"="+visible)
+				rows, err := CheckReadiness(t.Context(), projects, "developer", "fixture", "offline store fixture", "", run)
+				tools, req := readinessRow(t, rows, "toolchain"), readinessRow(t, rows, "requirements")
+				if (err == nil) != present || !strings.Contains(tools.Observed, tc.version) || !strings.Contains(tools.Observed, "21.0.4") ||
+					(!present && !strings.Contains(req.Reason, tc.missing)) {
+					t.Fatalf("present=%t rows=%+v err=%v", present, rows, err)
+				}
+			}
+			if tc.ecosystem == "maven" {
+				writeReadinessFixture(t, root, map[string]string{"pom.xml": strings.Replace(tc.files["pom.xml"], "1.0</version>", "${library.version}</version>", 1)})
+			} else {
+				writeReadinessFixture(t, root, map[string]string{"gradle.lockfile": "org.example:library:1.+=runtimeClasspath\n"})
+			}
+			projects, err = DiscoverReadiness(t.Context(), root, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows, err := CheckReadiness(t.Context(), projects, "tester", "fixture", "offline store fixture", "", localReadinessExecutor(t, "PATH="+bin+":/usr/bin:/bin"))
+			if req := readinessRow(t, rows, "requirements"); err == nil || req.Status != "unverified" || !req.Required {
+				t.Fatalf("dynamic declaration: rows=%+v err=%v", rows, err)
+			}
+		})
+	}
+}
+
+func TestReadinessNodeLockSelection(t *testing.T) {
+	for _, tc := range []struct {
+		name, manifest, wantLock, wantError string
+		locks                               map[string][]byte
+	}{
+		{"conflict", "{}", "", "competing locks", map[string][]byte{"package-lock.json": {}, "pnpm-lock.yaml": {}}},
+		{"explicit selection", `{"packageManager":"pnpm@10.0.0"}`, "pnpm-lock.yaml", "", map[string][]byte{"package-lock.json": {}, "pnpm-lock.yaml": {}}},
+		{"missing matching lock", `{"packageManager":"yarn@4.0.0"}`, "", "matching packageManager", map[string][]byte{"package-lock.json": {}}},
+		{"shrinkwrap precedence", "{}", "npm-shrinkwrap.json", "", map[string][]byte{"package-lock.json": {}, "npm-shrinkwrap.json": {}}},
+		{"wrong Yarn format", `{"packageManager":"yarn@4.0.0"}`, "", "matching the declared Yarn major", map[string][]byte{"yarn.lock": []byte("# yarn lockfile v1\n")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.locks["package.json"] = []byte(tc.manifest)
+			lock, _, _, err := readinessNodeFlow(tc.locks)
+			if lock != tc.wantLock || (err != nil) != (tc.wantError != "") || (err != nil && !strings.Contains(err.Error(), tc.wantError)) {
+				t.Fatalf("lock=%s, err=%v", lock, err)
 			}
 		})
 	}

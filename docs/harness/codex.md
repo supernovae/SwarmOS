@@ -130,6 +130,6 @@ it does not grant agent network access. Node capability labels and WorkUnit
 `required_capabilities` continue to select workers independently of this report.
 
 On Linux, direct isolated issue work checks the native Codex tool environment
-before claiming work. Run `swarm repo doctor` to check the tools selected for
+before claiming work and again before role launch. Run `swarm repo doctor` to check the tools selected for
 the current checkout. See [project readiness](../project.md#project-readiness)
 for local package requirements and offline OCI configuration.

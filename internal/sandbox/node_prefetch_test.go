@@ -235,6 +235,16 @@ func recordNodePrefetch(t *testing.T, fail error) *[]prefetchCall {
 			return nil
 		})
 		calls = append(calls, prefetchCall{dir, slices.Clone(env), slices.Clone(argv), files})
+		if fail == nil && len(argv) == 2 && argv[1] == "--version" {
+			version := "11.0.0"
+			if argv[0] == "yarn" {
+				version = "1.22.22"
+				if strings.Contains(files["yarn.lock"], "__metadata:") {
+					version = "4.0.0"
+				}
+			}
+			return []byte(version + "\n"), nil, nil
+		}
 		return nil, nil, fail
 	}
 	t.Cleanup(func() { runPrefetchCommand = previous })
@@ -269,7 +279,7 @@ func TestNodeDependencyCacheSyntheticHome(t *testing.T) {
 			if len(deps.Caches) != 1 || deps.Caches[0] != (DependencyCache{Ecosystem: "node", EnvKey: "npm_config_cache", Dir: dir}) {
 				t.Fatalf("caches = %+v, want one node cache at %s", deps.Caches, dir)
 			}
-			if len(*calls) != 1 || !slices.Equal((*calls)[0].argv, tc.argv) {
+			if len(*calls) == 0 || !slices.Equal((*calls)[len(*calls)-1].argv, tc.argv) {
 				t.Fatalf("prefetch commands = %+v, want %q", *calls, tc.argv)
 			}
 
@@ -338,7 +348,7 @@ func TestNodePrefetchScratchExcludesRepoConfig(t *testing.T) {
 	hostNodeEnv(t)
 	calls := recordNodePrefetch(t, nil)
 	repo, base := nodeRepo(t, map[string]string{
-		"package.json":                    `{"name":"fixture","packageManager":"yarn@4.0.0","workspaces":["packages/*"]}`,
+		"package.json":                    `{"name":"fixture","packageManager":"npm@11.0.0","workspaces":["packages/*"]}`,
 		"package-lock.json":               `{"lockfileVersion": 3, "packages": {}}`,
 		".npmrc":                          "registry=https://evil.example/\n",
 		".yarnrc.yml":                     "yarnPath: .yarn/releases/x.cjs\n",
@@ -352,10 +362,10 @@ func TestNodePrefetchScratchExcludesRepoConfig(t *testing.T) {
 	if _, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, resolvedTempDir(t), PerRepository); err != nil {
 		t.Fatal(err)
 	}
-	if len(*calls) != 1 {
+	if len(*calls) != 2 || !slices.Equal((*calls)[0].argv, []string{"npm", "--version"}) {
 		t.Fatalf("prefetch commands = %+v", *calls)
 	}
-	files := (*calls)[0].files
+	files := (*calls)[1].files
 	var names []string
 	for name := range files {
 		names = append(names, name)
@@ -511,7 +521,7 @@ func TestNodePrefetchRunsNoPackageCode(t *testing.T) {
 			store = t.TempDir()
 		}
 		rows, err := CheckReadiness(t.Context(), projects, "developer", "fixture", "fixture", "", localReadinessExecutor(t, "npm_config_cache="+store))
-		if (err == nil) != present || rows[1].Status != "passed" {
+		if (err == nil) != present || readinessRow(t, rows, "toolchain").Status != "passed" {
 			t.Fatalf("present=%t rows=%+v err=%v", present, rows, err)
 		}
 	}

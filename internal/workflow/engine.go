@@ -197,6 +197,7 @@ type AgentInspector func(string, *contract.SwarmConfig, bool, string, agent.Runn
 
 type Engine struct {
 	inspectAgent           AgentInspector
+	probeReadiness         readinessProbe
 	InspectCapabilityEntry func(string) error
 	progressTicks          <-chan time.Time
 	progressNow            func() time.Time

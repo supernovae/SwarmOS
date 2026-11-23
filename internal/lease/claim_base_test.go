@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
@@ -381,6 +383,7 @@ func TestReadinessFreshClaimBase(t *testing.T) {
 	}{
 		{name: "advance", gate: "agent", wantCallback: true},
 		{name: "reject", gate: "agent", wantCallback: true, fail: true},
+		{name: "unverified", gate: "agent", wantCallback: true},
 		{name: "CAS conflict", gate: "agent", wantCallback: true, race: true},
 		{name: "human", gate: "human"},
 	} {
@@ -405,6 +408,12 @@ func TestReadinessFreshClaimBase(t *testing.T) {
 				}
 				return strings.TrimSpace(string(out))
 			}
+			if tc.name == "unverified" {
+				if err := os.WriteFile(filepath.Join(m.repoRoot, "package.json"), []byte(`{"engines":{"node":">=24"}}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+				git("add", "package.json")
+			}
 			git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "advance")
 			tip := git("rev-parse", "HEAD")
 			if tc.race {
@@ -420,6 +429,20 @@ func TestReadinessFreshClaimBase(t *testing.T) {
 				if tc.fail {
 					return rejected
 				}
+				if tc.name == "unverified" {
+					projects, err := sandbox.DiscoverReadiness(ctx, m.repoRoot, candidate.BaseSHA)
+					if err != nil || len(projects) != 1 || projects[0].Ecosystem != "node" {
+						t.Fatalf("discover final approved candidate: %+v, %v", projects, err)
+					}
+					rows, err := sandbox.CheckReadiness(ctx, projects, "developer", "codex", "fixture", "", func(_ context.Context, _, _ string, out, _ io.Writer) error {
+						_, err := io.WriteString(out, "/bin/node\nv24.0.0\n")
+						return err
+					})
+					if err == nil || len(rows) == 0 || rows[0].Status != "unverified" || !rows[0].Required {
+						t.Fatalf("rows=%+v err=%v", rows, err)
+					}
+					return err
+				}
 				candidate.BaseSHA = initial.BaseSHA
 				return nil
 			})
@@ -432,7 +455,7 @@ func TestReadinessFreshClaimBase(t *testing.T) {
 				}
 				return
 			}
-			if err == nil || (tc.fail && !errors.Is(err, rejected)) || (tc.race && !errors.Is(err, ErrClaimRaceLost)) {
+			if err == nil || (tc.name == "unverified" && !strings.Contains(err.Error(), "commit a supported lockfile")) || (tc.fail && !errors.Is(err, rejected)) || (tc.race && !errors.Is(err, ErrClaimRaceLost)) {
 				t.Fatalf("unexpected error %v", err)
 			}
 			st, loadErr := m.GetCurrentState(ctx, issue.Number)

@@ -51,6 +51,7 @@ func CheckConfiguredReadiness(ctx context.Context, projects []sandbox.ReadinessP
 	failedSelection := func(err error) ([]sandbox.ReadinessRow, error) {
 		rows, _ := sandbox.CheckReadiness(ctx, projects, role, name, boundary, err.Error(), nil)
 		for i := range rows {
+			rows[i].Required = true
 			if rows[i].Check == "toolchain" {
 				rows[i].Status = "failed"
 			}

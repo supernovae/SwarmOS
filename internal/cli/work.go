@@ -361,10 +361,10 @@ func writePromptScaffoldReport(out io.Writer, report *workflow.PromptScaffoldRep
 }
 
 func writeReadiness(out io.Writer, report *sandbox.ReadinessReport) {
-	if report == nil || len(report.Rows) == 0 {
+	if report == nil || report.Outcome == "" {
 		return
 	}
-	fmt.Fprintf(out, "Project readiness (%s)\n", report.Input)
+	fmt.Fprintf(out, "Project readiness (%s): %s\n", report.Input, report.Outcome)
 	for _, row := range report.Rows {
 		fmt.Fprintf(out, "  %s (%s/%s) %s %s %s: %s (%s)", row.Role, row.Agent, row.Boundary, row.Project, row.Ecosystem, row.Check, row.Status, row.Reason)
 		fmt.Fprintf(out, " [source %q]", row.Source)

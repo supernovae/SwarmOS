@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/supernovae/swarmos/internal/storageuse"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"gopkg.in/yaml.v3"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -398,6 +400,25 @@ func TestReadinessPreclaim(t *testing.T) {
 	if err != nil || st.Lease.ClaimID != approved.Lease.ClaimID || !prefetched || launched {
 		t.Fatalf("state=%+v err=%v prefetched=%t launched=%t", st, err, prefetched, launched)
 	}
+	probe := func(ctx context.Context, projects []sandbox.ReadinessProject, name, role string, _ *contract.SwarmConfig, _ bool, _ agent.RunnerOptions, _ sandbox.Dependencies, deferred string) ([]sandbox.ReadinessRow, error) {
+		return sandbox.CheckReadiness(ctx, projects, role, name, "fixture", deferred, func(_ context.Context, _, command string, out, _ io.Writer) error {
+			if !strings.Contains(command, "node --version") {
+				return fmt.Errorf("unexpected command %s", command)
+			}
+			_, err := io.WriteString(out, "/bin/node\nv24.1.0\n")
+			return err
+		})
+	}
+	eng.probeReadiness = probe
+	_, err = eng.ExecuteWork(t.Context(), WorkOptions{RepoRoot: root, IssueNumber: issue, AgentName: "codex", Phase: "all", Headless: true})
+	if err == nil || launched || !strings.Contains(err.Error(), "commit a supported lockfile") {
+		t.Fatalf("required unverified check did not stop fresh work: %v", err)
+	}
+	st, err = eng.LeaseManager.GetCurrentState(t.Context(), issue)
+	if err != nil || st.Lease.ClaimID != approved.Lease.ClaimID {
+		t.Fatalf("unverified readiness touched claim state: state=%+v err=%v", st, err)
+	}
+	eng.probeReadiness = nil
 	claimed, err := eng.LeaseManager.Acquire(t.Context(), issue, "local-dev", "codex", "plan", time.Hour, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -415,4 +436,17 @@ func TestReadinessPreclaim(t *testing.T) {
 		t.Fatalf("late developer should be checked separately: %v", err)
 	}
 
+	eng.probeReadiness = probe
+	preview, err := eng.checkIssueReadiness(t.Context(), WorkOptions{RepoRoot: root}, cfg, approved.BaseSHA, sandbox.Dependencies{}, map[string]string{"developer": "codex"}, nil)
+	if err == nil || preview.Outcome != "blocked" || len(preview.Rows) == 0 ||
+		preview.Rows[0].Status != "unverified" || !preview.Rows[0].Required || !strings.Contains(err.Error(), "commit a supported lockfile") {
+		t.Fatalf("required unverified check did not block: report=%+v err=%v", preview, err)
+	}
+	_, err = eng.ExecuteWork(t.Context(), opts)
+	if err == nil || launched || !strings.Contains(err.Error(), "commit a supported lockfile") {
+		t.Fatalf("required unverified check did not stop resumption: %v", err)
+	}
+	if err := r.checkLaunchReadiness("tester", "codex"); err == nil || !strings.Contains(err.Error(), "commit a supported lockfile") {
+		t.Fatalf("required unverified check did not stop late tester launch: %v", err)
+	}
 }

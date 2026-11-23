@@ -16,19 +16,26 @@ import (
 	"github.com/supernovae/swarmos/internal/storageuse"
 )
 
+type readinessProbe func(context.Context, []sandbox.ReadinessProject, string, string, *contract.SwarmConfig, bool, agent.RunnerOptions, sandbox.Dependencies, string) ([]sandbox.ReadinessRow, error)
+
 func (e *Engine) issueReadiness(opts WorkOptions, st *lease.IssueState, execution contract.ExecutionConfig) bool {
 	return runtime.GOOS == "linux" && execution.Mode == contract.ExecutionIsolated && opts.PRNumber == 0 && !opts.ManualClaim &&
 		st.PRNumber == 0 && st.PRRevision == nil && st.ForkRepo == "" && !opts.ForkMode && !e.ForkMode && !e.LeaseManager.HasWorkerGateway()
 }
 
-func (e *Engine) checkIssueReadiness(ctx context.Context, opts WorkOptions, cfg *contract.SwarmConfig, base string, deps sandbox.Dependencies, agents map[string]string, preview []RolePreview) (*sandbox.ReadinessReport, error) {
+func (e *Engine) checkIssueReadiness(ctx context.Context, opts WorkOptions, cfg *contract.SwarmConfig, base string, deps sandbox.Dependencies, agents map[string]string, preview []RolePreview) (_ *sandbox.ReadinessReport, resultErr error) {
 	report := &sandbox.ReadinessReport{Input: "approved base " + base, Rows: []sandbox.ReadinessRow{}}
+	defer func() { report.RefreshOutcome(resultErr) }()
 	if !opts.InspectOnly && agents["developer"] == "" && agents["tester"] == "" {
 		return report, nil
 	}
 	projects, err := sandbox.DiscoverReadiness(ctx, opts.RepoRoot, base)
 	if err != nil {
 		return report, err
+	}
+	probe := e.probeReadiness
+	if probe == nil {
+		probe = agent.CheckConfiguredReadiness
 	}
 	for _, role := range []string{"developer", "tester"} {
 		name := agents[role]
@@ -47,7 +54,7 @@ func (e *Engine) checkIssueReadiness(ctx context.Context, opts WorkOptions, cfg 
 		} else if name == "" {
 			continue
 		}
-		rows, err := agent.CheckConfiguredReadiness(ctx, projects, name, role, cfg, e.Tracker.BackendName() == "local", e.runnerOptions(ctx), deps, reason)
+		rows, err := probe(ctx, projects, name, role, cfg, e.Tracker.BackendName() == "local", e.runnerOptions(ctx), deps, reason)
 		report.Rows = append(report.Rows, rows...)
 		if err != nil {
 			return report, fmt.Errorf("%s readiness at %s: %w", role, report.Input, err)

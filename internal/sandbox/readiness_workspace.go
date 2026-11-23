@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"path"
 	"slices"
+	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -65,6 +66,9 @@ func readinessWorkspaces(inputs map[string][]byte) []readinessWorkspace {
 			workspaces = append(workspaces, root)
 		}
 	}
+	sort.Slice(workspaces, func(i, j int) bool {
+		return workspaces[i].dir > workspaces[j].dir
+	})
 	return workspaces
 }
 
@@ -94,38 +98,49 @@ func workspaceMember(workspace readinessWorkspace, directory string) bool {
 
 func deduplicateReadinessProjects(projects []ReadinessProject, inputs map[string][]byte) []ReadinessProject {
 	for _, workspace := range readinessWorkspaces(inputs) {
-		projects = slices.DeleteFunc(projects, func(p ReadinessProject) bool {
-			if p.Ecosystem != workspace.ecosystem || p.Directory == workspace.dir || !workspaceMember(workspace, p.Directory) {
-				return false
+		retained := projects[:0]
+		for _, project := range projects {
+			if project.Ecosystem != workspace.ecosystem || project.Directory == workspace.dir ||
+				project.workspaceRoot != "" || !workspaceMember(workspace, project.Directory) {
+				retained = append(retained, project)
+				continue
 			}
-			var independent []string
-			switch p.Ecosystem {
-			case "go":
-				independent = []string{"go.work"}
-			case "rust":
-				if strings.Contains(string(inputs[path.Join(p.Directory, "Cargo.toml")]), "rust-version") {
-					return false
-				}
-				independent = []string{"Cargo.lock", "rust-toolchain", "rust-toolchain.toml"}
-			case "node":
-				var declared struct {
-					Engines        json.RawMessage
-					PackageManager string
-				}
-				if json.Unmarshal(inputs[path.Join(p.Directory, "package.json")], &declared) == nil && (len(declared.Engines) > 0 || declared.PackageManager != "") {
-					return false
-				}
-				independent = []string{"package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "pnpm-workspace.yaml"}
+			if independent, ownVersion := readinessWorkspaceMemberDeclarations(project); independent {
+				retained = append(retained, project)
+			} else if ownVersion {
+				project.workspaceRoot = workspace.dir
+				retained = append(retained, project)
 			}
-			for _, name := range independent {
-				if _, ok := inputs[path.Join(p.Directory, name)]; ok {
-					return false
-				}
-			}
-			return true
-		})
+		}
+		projects = retained
 	}
 	return projects
+}
+
+func readinessWorkspaceMemberDeclarations(p ReadinessProject) (independent, ownVersion bool) {
+	var names []string
+	switch p.Ecosystem {
+	case "go":
+		names = []string{"go.work"}
+	case "rust":
+		names = []string{"Cargo.lock", "rust-toolchain", "rust-toolchain.toml"}
+		ownVersion = strings.Contains(string(p.inputs[path.Join(p.Directory, "Cargo.toml")]), "rust-version")
+	case "node":
+		names = append(slices.Clone(nodeLockfiles), "pnpm-workspace.yaml")
+		var manifest struct {
+			Engines        json.RawMessage
+			PackageManager string
+		}
+		if json.Unmarshal(p.inputs[path.Join(p.Directory, "package.json")], &manifest) == nil {
+			independent, ownVersion = manifest.PackageManager != "", len(manifest.Engines) > 0
+		}
+	}
+	for _, name := range names {
+		if _, ok := p.inputs[path.Join(p.Directory, name)]; ok {
+			independent = true
+		}
+	}
+	return independent, ownVersion
 }
 
 func validateReadinessGoInput(p ReadinessProject, name string, data []byte) error {

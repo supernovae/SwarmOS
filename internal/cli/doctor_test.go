@@ -476,7 +476,7 @@ func TestReadinessDoctor(t *testing.T) {
 	f.setenv("SWARM_EXECUTION_MODE", "")
 	opts := f.options(&RootOptions{RepoRoot: f.root})
 	err = doctorReadiness(t.Context(), f.root, cfg, true, opts, &report)
-	if err == nil || len(report.Rows) != 4 {
+	if err == nil || len(report.Rows) != 4 || report.Outcome != "blocked" {
 		t.Fatalf("readiness=%+v err=%v", report, err)
 	}
 	if report.Rows[1].Agent != "checkout-dev" || report.Rows[1].Status != "failed" ||
@@ -485,7 +485,7 @@ func TestReadinessDoctor(t *testing.T) {
 	}
 	var out strings.Builder
 	writeReadiness(&out, &report)
-	for _, want := range []string{"Project readiness (checkout)", "checkout-dev/codex-native", "checkout-test/harness-tools-bwrap"} {
+	for _, want := range []string{"Project readiness (checkout): blocked", "checkout-dev/codex-native", "checkout-test/harness-tools-bwrap"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("readiness text omitted %q: %s", want, out.String())
 		}

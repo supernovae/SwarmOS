@@ -290,8 +290,8 @@ func resolveHostToolchains(home string, getenv func(string) string) []ToolchainB
 	addCache("c-cpp", "VCPKG_DEFAULT_BINARY_CACHE", firstCandidate("VCPKG_DEFAULT_BINARY_CACHE", vcpkgFallbacks...))
 
 	if home != "" {
-		addCache("maven", "", filepath.Join(home, ".m2", "repository"))
-		addCache("gradle", "", filepath.Join(home, ".gradle", "caches"))
+		addCache("maven", "SWARM_MAVEN_REPOSITORY", filepath.Join(home, ".m2", "repository"))
+		addCache("gradle", "SWARM_GRADLE_CACHES", filepath.Join(home, ".gradle", "caches"))
 		addCache("gradle", "", filepath.Join(home, ".gradle", "wrapper"))
 		addToolchainRoot("SDKMAN_DIR", firstCandidate("SDKMAN_DIR", filepath.Join(home, ".sdkman")))
 		addToolchainRoot("ASDF_DATA_DIR", firstCandidate("ASDF_DATA_DIR", filepath.Join(home, ".asdf")), "shims", "bin")

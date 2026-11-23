@@ -356,6 +356,89 @@ func TestReadinessOfflineDependenciesDotnet(t *testing.T) {
 	if source != "fixture.csproj" || !strings.Contains(generated, "Fixture.Package") || !strings.Contains(generated, "1.2.3") || !strings.Contains(generated, "net8.0") || !strings.Contains(string(files["NuGet.Config"]), "<clear/>") {
 		t.Fatalf("source=%s files=%v", source, files)
 	}
+	t.Run("offline SDK and package visibility fixture", func(t *testing.T) {
+		// Run the production probe through a test SDK that checks the generated
+		// restore inputs and resolves the package from the selected store.
+		bin, sdk, packages := t.TempDir(), t.TempDir(), t.TempDir()
+		const packagePath = "fixture.package/1.2.3/fixture.package.nuspec"
+		writeReadinessFixture(t, sdk, map[string]string{
+			"sdk/8.0.100/MSBuild.dll": "",
+			"packs/Microsoft.NETCore.App.Ref/8.0.0/ref/net8.0/System.Runtime.dll": "",
+		})
+		writeReadinessFixture(t, packages, map[string]string{
+			packagePath: `<package><metadata><id>Fixture.Package</id><version>1.2.3</version></metadata></package>`,
+		})
+		const dotnet = `#!/bin/sh
+set -eu
+fail() { printf '%s\n' "$1" >&2; exit 1; }
+test -f "$DOTNET_ROOT/sdk/8.0.100/MSBuild.dll" || fail 'SDK 8.0.100 is missing'
+case "$1" in
+  --version) printf '%s\n' 8.0.100 ;;
+  restore)
+    test "$#" -eq 5 && test "$2" = ./readiness-0.csproj &&
+      test "$3" = --configfile && test "$4" = ./NuGet.Config &&
+      test "$5" = -nodeReuse:false || fail 'unexpected restore arguments'
+    project=
+    IFS= read -r project < "$2" || test -n "$project"
+    case "$project" in
+      *'<TargetFrameworks>net8.0</TargetFrameworks>'*'<NuGetAudit>false</NuGetAudit>'*'<PackageReference Include="Fixture.Package" Version="1.2.3" />'*) ;;
+      *) fail 'unexpected generated project' ;;
+    esac
+    config=
+    IFS= read -r config < "$4" || test -n "$config"
+    test "$config" = '<configuration><packageSources><clear/></packageSources></configuration>' ||
+      fail 'restore must clear package sources'
+    test -f "$DOTNET_ROOT/packs/Microsoft.NETCore.App.Ref/8.0.0/ref/net8.0/System.Runtime.dll" ||
+      fail 'net8.0 reference pack is missing'
+    package="$NUGET_PACKAGES/fixture.package/1.2.3/fixture.package.nuspec"
+    test -f "$package" || fail 'Fixture.Package 1.2.3 is missing from the selected store'
+    metadata=
+    IFS= read -r metadata < "$package" || test -n "$metadata"
+    case "$metadata" in
+      *'<id>Fixture.Package</id><version>1.2.3</version>'*) ;;
+      *) fail 'unexpected package metadata' ;;
+    esac
+    ;;
+  *) fail 'unexpected SDK command' ;;
+esac
+`
+		if err := os.WriteFile(filepath.Join(bin, "dotnet"), []byte(dotnet), 0700); err != nil {
+			t.Fatal(err)
+		}
+		wrongVersion := t.TempDir()
+		writeReadinessFixture(t, wrongVersion, map[string]string{
+			"fixture.package/1.2.4/fixture.package.nuspec": `<package><metadata><id>Fixture.Package</id><version>1.2.4</version></metadata></package>`,
+		})
+		sdkWithoutPack := t.TempDir()
+		writeReadinessFixture(t, sdkWithoutPack, map[string]string{"sdk/8.0.100/MSBuild.dll": ""})
+		for _, tc := range []struct {
+			name, sdk, packages, check, wantFailure string
+		}{
+			{"available", sdk, packages, "requirements", ""},
+			{"missing selected store", sdk, filepath.Join(t.TempDir(), "unmounted"), "requirements", "Fixture.Package 1.2.3 is missing"},
+			{"wrong package version", sdk, wrongVersion, "requirements", "Fixture.Package 1.2.3 is missing"},
+			{"missing reference pack", sdkWithoutPack, packages, "requirements", "net8.0 reference pack is missing"},
+			{"missing selected SDK", t.TempDir(), packages, "toolchain", "SDK 8.0.100 is missing"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				for _, role := range []string{"developer", "tester"} {
+					run := localReadinessExecutor(t, "PATH="+bin, "DOTNET_ROOT="+tc.sdk, "NUGET_PACKAGES="+tc.packages)
+					rows, err := CheckReadiness(t.Context(), projects, role, "fixture", "offline SDK fixture", "", run)
+					row := readinessRow(t, rows, tc.check)
+					if tc.wantFailure == "" {
+						if err != nil || row.Status != "passed" || row.Observed != "8.0.100" {
+							t.Fatalf("%s: rows=%+v err=%v", role, rows, err)
+						}
+					} else if err == nil || row.Status != "failed" || !strings.Contains(row.Reason, tc.wantFailure) {
+						t.Fatalf("%s: expected %q, rows=%+v err=%v", role, tc.wantFailure, rows, err)
+					}
+					if row.Role != role || row.Source != source || !row.Required {
+						t.Fatalf("unexpected readiness row: %+v", row)
+					}
+				}
+			})
+		}
+	})
 	t.Run("local SDK and package", func(t *testing.T) {
 		dotnet, err := exec.LookPath("dotnet")
 		if err != nil {
@@ -489,7 +572,9 @@ func TestReadinessRoleBoundaryPolicies(t *testing.T) {
 	home := resolvedTempDir(t)
 	t.Setenv("HOME", home)
 	maven, gradle := filepath.Join(home, ".m2", "repository"), filepath.Join(home, ".gradle", "caches")
-	for _, dir := range []string{maven, gradle} {
+	nuget := filepath.Join(home, ".nuget", "packages")
+	t.Setenv("NUGET_PACKAGES", nuget)
+	for _, dir := range []string{maven, gradle, nuget} {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -519,7 +604,11 @@ func TestReadinessRoleBoundaryPolicies(t *testing.T) {
 	if strings.Contains(bwrap, "coordinator-secret") || strings.Contains(bwrap, "/secret/provider-home") {
 		t.Fatalf("delegated tool got host credentials %s", bwrap)
 	}
-	for _, store := range []struct{ key, dir string }{{"SWARM_MAVEN_REPOSITORY", maven}, {"SWARM_GRADLE_CACHES", gradle}} {
+	for _, store := range []struct{ key, dir string }{
+		{"SWARM_MAVEN_REPOSITORY", maven},
+		{"SWARM_GRADLE_CACHES", gradle},
+		{"NUGET_PACKAGES", nuget},
+	} {
 		if !strings.Contains(argv, strconv.Quote(store.dir)+`="read"`) || !strings.Contains(argv, store.key+"="+strconv.Quote(store.dir)) ||
 			!containsRun(flags, []string{"--ro-bind", store.dir, store.dir}) || !containsRun(flags, []string{"--setenv", store.key, store.dir}) {
 			t.Fatalf("selected store %s is not mounted read-only in both policies", store.key)

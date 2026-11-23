@@ -445,7 +445,11 @@ esac
 			t.Skipf(".NET SDK unavailable: %v", err)
 		}
 		provision := t.TempDir()
-		version, err := exec.Command(dotnet, "--version").Output()
+		hostHome := filepath.Join(provision, "host-home")
+		versionCmd := exec.CommandContext(t.Context(), dotnet, "--version")
+		versionCmd.Dir = provision
+		versionCmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + hostHome, "DOTNET_CLI_HOME=" + hostHome, "DOTNET_CLI_TELEMETRY_OPTOUT=1", "DOTNET_NOLOGO=1"}
+		version, err := versionCmd.Output()
 		if err != nil {
 			t.Skipf("installed SDK unavailable: %v", err)
 		}
@@ -459,20 +463,24 @@ esac
 			"consumer/fixture.csproj":        strings.ReplaceAll(string(mustReadReadinessFixture(t, filepath.Join(root, "fixture.csproj"))), "net8.0", framework),
 			"consumer/global.json":           fmt.Sprintf(`{"sdk":{"version":%q,"rollForward":"disable"}}`, version),
 		})
-		store := filepath.Join(provision, "packages")
+		// Keep the package in the fixture HOME's default NuGet store for all
+		// cases. An empty selected store must fail even with that store present.
+		store := filepath.Join(hostHome, ".nuget", "packages")
 		run := localReadinessExecutor(t, "NUGET_PACKAGES="+store, "DOTNET_CLI_TELEMETRY_OPTOUT=1")
 		var out, diagnostics readinessOutput
 		if err := run(t.Context(), provision, "dotnet pack ./package/Fixture.Package.csproj -o ./feed && dotnet restore ./consumer/fixture.csproj --source ./feed -p:NuGetAudit=false", &out, &diagnostics); err != nil {
 			t.Fatalf("provision package: %v: %s %s", err, out.data, diagnostics.data)
 		}
+		if _, err := os.Stat(filepath.Join(store, "fixture.package", "1.2.3", "fixture.package.nuspec")); err != nil {
+			t.Fatalf("package is missing from the host-like store: %v", err)
+		}
 		consumer := filepath.Join(provision, "consumer")
 		for _, tc := range []struct {
-			name, cache, sdk string
-			pass             bool
+			name, cache, sdk, wantFailure string
 		}{
-			{"available", store, string(version), true},
-			{"missing package", t.TempDir(), string(version), false},
-			{"missing selected SDK", store, "999.0.100", false},
+			{"available", store, string(version), ""},
+			{"missing package in selected store", t.TempDir(), string(version), "Fixture.Package (>= 1.2.3)"},
+			{"missing selected SDK", store, "999.0.100", "999.0.100"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				writeReadinessFixture(t, consumer, map[string]string{"global.json": fmt.Sprintf(`{"sdk":{"version":%q,"rollForward":"disable"}}`, tc.sdk)})
@@ -480,9 +488,15 @@ esac
 				if err != nil {
 					t.Fatal(err)
 				}
-				rows, err := CheckReadiness(t.Context(), projects, "tester", "fixture", "fixture", "", localReadinessExecutor(t, "NUGET_PACKAGES="+tc.cache))
-				if (err == nil) != tc.pass || rows[0].Status == "unverified" {
-					t.Fatalf("rows=%+v err=%v", rows, err)
+				run := localReadinessExecutor(t, "HOME="+hostHome, "NUGET_PACKAGES="+tc.cache)
+				rows, err := CheckReadiness(t.Context(), projects, "tester", "fixture", "fixture", "", run)
+				row := readinessRow(t, rows, "requirements")
+				if tc.wantFailure == "" {
+					if err != nil || row.Status != "passed" {
+						t.Fatalf("rows=%+v err=%v", rows, err)
+					}
+				} else if err == nil || !row.Required || row.Status != "failed" || !strings.Contains(row.Observed+"\n"+row.Reason, tc.wantFailure) {
+					t.Fatalf("expected %q in failed requirements check, rows=%+v err=%v", tc.wantFailure, rows, err)
 				}
 			})
 		}

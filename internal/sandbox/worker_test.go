@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"archive/tar"
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -217,12 +218,21 @@ func TestWorkerProjectPlanHasDedicatedArtifactChannel(t *testing.T) {
 	}
 }
 
+func TestReadinessPinnedOCI(t *testing.T) {
+	testWorkerStub(t, []string{"readiness-pass", "readiness-fail"})
+}
+
 func TestWorkerPreflightChecksDaemonAndCleansUp(t *testing.T) {
+	testWorkerStub(t, []string{"safe", "volume", "windows-image", "privileged", "cleanup-failure", "execution-cleanup-failure", "tmpfs-size", "tmpfs-owner", "tmpfs-mode", "tmpfs-missing", "tmpfs-extra", "tmpfs-duplicate", "duplicate-mount"})
+}
+
+func testWorkerStub(t *testing.T, kinds []string) {
+	t.Helper()
 	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("fake runtime uses a Unix shell; archive tests cover portable importer")
 	}
-	for _, kind := range []string{"safe", "volume", "windows-image", "privileged", "cleanup-failure", "execution-cleanup-failure", "tmpfs-size", "tmpfs-owner", "tmpfs-mode", "tmpfs-missing", "tmpfs-extra", "tmpfs-duplicate", "duplicate-mount"} {
+	for _, kind := range kinds {
 		t.Run(kind, func(t *testing.T) {
 			// Keep the multi-process daemon probe rows sequential to bound process fan-out.
 			root := t.TempDir()
@@ -239,6 +249,14 @@ func TestWorkerPreflightChecksDaemonAndCleansUp(t *testing.T) {
 				host["Privileged"] = true
 			}
 			tmpfs := host["Tmpfs"].(map[string]string)
+			readiness := strings.HasPrefix(kind, "readiness-")
+			probeImage := "local/probe@sha256:" + strings.Repeat("c", 64)
+			if kind == "readiness-fail" {
+				probeImage = "local/probe@sha256:" + strings.Repeat("d", 64)
+			}
+			if readiness {
+				tmpfs["/workspace"] = strings.ReplaceAll(tmpfs["/workspace"], "uid=0,gid=0", "uid=65534,gid=65534")
+			}
 			switch kind {
 			case "tmpfs-size":
 				tmpfs["/workspace"] = strings.Replace(tmpfs["/workspace"], "512m", "2g", 1)
@@ -274,6 +292,15 @@ func TestWorkerPreflightChecksDaemonAndCleansUp(t *testing.T) {
 			if kind == "execution-cleanup-failure" {
 				script += " cp) cat >/dev/null;;\n exec) case \"$*\" in *worker-payload*) printf execution-failed >&2; exit 19;; *) :;; esac;;\n"
 			}
+			if readiness {
+				script += " cp) cat >/dev/null;;\n exec) case \"$*\" in *readiness-payload*) "
+				if kind == "readiness-fail" {
+					script += "printf 'missing SDK' >&2; exit 127"
+				} else {
+					script += "printf 'fixture SDK 1.2.3'"
+				}
+				script += ";; *) :;; esac;;\n"
+			}
 			script += " *) :;;\nesac\n"
 			executable := filepath.Join(root, "docker")
 			if err := testutil.WriteExecutable(executable, []byte(script), 0700); err != nil {
@@ -287,18 +314,37 @@ func TestWorkerPreflightChecksDaemonAndCleansUp(t *testing.T) {
 						t.Fatalf("lost simultaneous execution/cleanup error %q: %v", message, err)
 					}
 				}
+			} else if readiness {
+				var output, diagnostics bytes.Buffer
+				err = RunWorker(t.Context(), t.TempDir(), "/bin/sh", []string{"-c", "readiness-payload"}, WorkerOptions{Runtime: executable, Image: probeImage, Role: "tester", DiscardChanges: true}, nil, &output, &diagnostics)
+				if kind == "readiness-pass" && (err != nil || output.String() != "fixture SDK 1.2.3") {
+					t.Fatalf("output=%q diagnostics=%q err=%v", &output, &diagnostics, err)
+				}
+				if kind == "readiness-fail" && (err == nil || diagnostics.String() != "missing SDK") {
+					t.Fatalf("diagnostics=%q err=%v", &diagnostics, err)
+				}
 			} else {
 				err = CheckWorkerRuntime(context.Background(), executable, "local/image@sha256:"+strings.Repeat("b", 64))
 			}
 			if kind == "safe" && err != nil {
 				t.Fatal(err)
 			}
-			if kind != "safe" && err == nil {
+			if kind != "safe" && kind != "readiness-pass" && err == nil {
 				t.Fatal("unsafe/unclean runtime passed preflight")
 			}
 			calls, readErr := os.ReadFile(filepath.Join(root, "calls"))
 			if readErr != nil {
 				t.Fatalf("read runtime calls: %v (preflight: %v)", readErr, err)
+			}
+			if readiness {
+				for _, want := range []string{"image inspect " + probeImage, "exec --user=65534:65534 --workdir=/workspace", "/bin/sh -c readiness-payload"} {
+					if !strings.Contains(string(calls), want) {
+						t.Fatalf("missing %q in %s", want, calls)
+					}
+				}
+				if strings.Contains(string(calls), "pause ") || strings.Contains(string(calls), "--mount") {
+					t.Fatalf("probe mounted host paths or requested import: %s", calls)
+				}
 			}
 			if kind == "volume" || kind == "windows-image" {
 				if strings.Contains(string(calls), "create ") {

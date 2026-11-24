@@ -75,7 +75,7 @@ func TestDoctorProgressOutput(t *testing.T) {
 					if failing {
 						status = "failed"
 					}
-					fmt.Fprintf(&expected, "],\"kind\":\"doctor\",\"status\":%q,\"tool_capabilities\":[]}\n", status)
+					fmt.Fprintf(&expected, "],\"kind\":\"doctor\",\"readiness\":{\"input\":\"checkout\",\"outcome\":\"\",\"rows\":[]},\"status\":%q,\"tool_capabilities\":[]}\n", status)
 					if stderr.Len() != 0 {
 						t.Fatalf("JSON stderr: %s", stderr.String())
 					}

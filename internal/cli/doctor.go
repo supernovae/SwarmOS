@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/supernovae/swarmos/internal/node"
 	"github.com/supernovae/swarmos/internal/progress"
 	"github.com/supernovae/swarmos/internal/sandbox"
+	"github.com/supernovae/swarmos/internal/storageuse"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workflow"
 	"github.com/supernovae/swarmos/internal/workspace"
@@ -46,6 +48,7 @@ func newDoctorCmdWithRunner(rootOpts *RootOptions, factory func(context.Context,
 				run = harness.NewDoctorRunner(cmd.Context(), observer, nil, nil)
 			}
 			capabilities := []sandbox.ToolCapabilityReport{}
+			readiness := sandbox.ReadinessReport{Input: "checkout", Rows: []sandbox.ReadinessRow{}}
 			checks := harness.RunDoctorWithRunner(repoRoot, checkGHAuth, run)
 			checks = append(checks, run.Run("system", "git-identity", func() harness.DoctorCheck {
 				if err := workspace.CheckCommitIdentity(cmd.Context(), repoRoot); err != nil {
@@ -84,6 +87,14 @@ func newDoctorCmdWithRunner(rootOpts *RootOptions, factory func(context.Context,
 					return detail, err
 				}
 				checks = append(checks, doctorAgentChecksWithRunner(cfg, !checkGHAuth, preflight, run)...)
+				checks = append(checks, run.Run("execution", "project-readiness", func() harness.DoctorCheck {
+					err := doctorReadiness(cmd.Context(), repoRoot, cfg, !checkGHAuth, rootOpts, &readiness)
+					status, detail := "OK", "checkout readiness inspected"
+					if err != nil {
+						status, detail = "FAIL", err.Error()
+					}
+					return harness.DoctorCheck{Category: "execution", Name: "project-readiness", Status: status, Detail: detail}
+				}))
 				checks = append(checks, run.Run("security", "plan-reviewers", func() harness.DoctorCheck { return doctorReviewerCheck(cfg) }))
 			}
 			if checkGHAuth && (rootOpts.trackerOverride != nil || rootOpts.Repo != "" || hasGitRemote(repoRoot)) {
@@ -115,11 +126,12 @@ func newDoctorCmdWithRunner(rootOpts *RootOptions, factory func(context.Context,
 				if failures > 0 {
 					status = "failed"
 				}
-				if err := writeJSON(cmd, map[string]any{"kind": "doctor", "status": status, "checks": checks, "tool_capabilities": capabilities}); err != nil {
+				if err := writeJSON(cmd, map[string]any{"kind": "doctor", "status": status, "checks": checks, "tool_capabilities": capabilities, "readiness": readiness}); err != nil {
 					return err
 				}
 			} else {
 				out := cmd.OutOrStdout()
+				writeReadiness(out, &readiness)
 				for _, report := range capabilities {
 					if showCapabilities {
 						fmt.Fprint(out, sandbox.FormatToolCapabilities(report))
@@ -314,4 +326,56 @@ func doctorBrowserProfileCheck(ctx context.Context, cfg *contract.SwarmConfig, p
 		}
 	}
 	return harness.DoctorCheck{Category: "execution", Name: "browser-profile", Status: status, Detail: detail}
+}
+
+func doctorReadiness(ctx context.Context, repo string, cfg *contract.SwarmConfig, local bool, opts *RootOptions, report *sandbox.ReadinessReport) (resultErr error) {
+	defer func() { report.RefreshOutcome(resultErr) }()
+	projects, err := sandbox.DiscoverReadiness(ctx, repo, "")
+	if err != nil || len(projects) == 0 {
+		return err
+	}
+	execution, err := contract.ResolveExecution(cfg, opts.getenv("SWARM_EXECUTION_MODE"))
+	if err != nil {
+		return err
+	}
+	var deps sandbox.Dependencies
+	if execution.Mode == contract.ExecutionIsolated && execution.Backend == contract.BackendNative {
+		probeCtx, scope, scopeErr := storageuse.Ensure(ctx, repo)
+		if scopeErr != nil {
+			return scopeErr
+		}
+		if scope != nil {
+			defer scope.Complete(&resultErr)
+		}
+		ctx = probeCtx
+		deps, err = sandbox.InspectDependencyCaches(ctx, repo, node.DependencyPolicy(opts.nodeConfigPath(), opts.registryPath(), repo))
+		if err != nil {
+			return err
+		}
+
+	}
+	for _, role := range []string{"developer", "tester"} {
+		rows, err := agent.CheckConfiguredReadiness(ctx, projects, workflow.SelectedRolePreview(cfg, role, workflow.WorkOptions{}).Entry, role, cfg, local, opts.runnerOptions(), deps, "")
+		if execution.Mode == contract.ExecutionIsolated && execution.Backend == contract.BackendNative && deps.Mode != sandbox.SharedHostCaches {
+			for i := range rows {
+				row := &rows[i]
+				if row.Status != "failed" || row.Check != "requirements" {
+					continue
+				}
+				switch row.Ecosystem {
+				case "node", "go", "rust", "python":
+					hasCache := false
+					for _, cache := range deps.Caches {
+						hasCache = hasCache || cache.Ecosystem == row.Ecosystem
+					}
+					if !hasCache {
+						row.Reason += ". The prepared repository cache is absent. Use a worker that can prepare the approved lockfile or provision an offline image with the packages."
+					}
+				}
+			}
+		}
+		report.Rows = append(report.Rows, rows...)
+		resultErr = errors.Join(resultErr, err)
+	}
+	return resultErr
 }

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/supernovae/swarmos/internal/storageuse"
 	"os"
 	"path"
 	"path/filepath"
@@ -14,11 +13,11 @@ import (
 	"strings"
 
 	"github.com/supernovae/swarmos/internal/gitcredential"
+	"github.com/supernovae/swarmos/internal/storageuse"
 )
 
-// nodeLockfiles enable the node adapter; each one present gets its own
-// fetch-only command.
-var nodeLockfiles = []string{"package-lock.json", "pnpm-lock.yaml", "yarn.lock"}
+// nodeLockfiles are the locks recognized by the fetch-only Node adapter.
+var nodeLockfiles = []string{"package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock"}
 
 // nodeCacheEnv gives each package manager its own subdirectory of the
 // per-repository cache. npm_config_cache identifies the cache.
@@ -37,7 +36,7 @@ const maxNodeManifests = 1000
 // runs postinstall steps. nodePrefetchEnv disables scripts again.
 func nodeFetchArgv(lockfile string, data []byte) []string {
 	switch lockfile {
-	case "package-lock.json":
+	case "package-lock.json", "npm-shrinkwrap.json":
 		return []string{"npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"}
 	case "pnpm-lock.yaml":
 		return []string{"pnpm", "fetch", "--frozen-lockfile"}
@@ -50,37 +49,78 @@ func nodeFetchArgv(lockfile string, data []byte) []string {
 	return nil
 }
 
-// nodePrefetch runs one fetch-only command per lockfile in the approved
-// base, each in a temporary copy holding only that lockfile, the workspace
-// file and the base's package.json files. Repository .npmrc, .yarnrc,
-// .yarn/ and .pnpmfile.cjs never reach the copy, and the packageManager
-// field is dropped, so no repository code or configured registry runs.
-// Git-hosted dependencies are refused first, because fetching them can run
-// their prepare script.
-func nodePrefetch(ctx context.Context, req prefetchRequest) error {
-	var present []string
-	for _, name := range nodeLockfiles {
-		if _, ok := req.Files[name]; ok {
-			present = append(present, name)
+// readinessNodeFlow selects the same sanitized lockfile flow for preparation
+// and consumption. A repository with competing locks needs an explicit manager.
+func readinessNodeFlow(files map[string][]byte) (lock, manager, version string, err error) {
+	var manifest struct {
+		Manager string `json:"packageManager"`
+	}
+	if json.Unmarshal(files["package.json"], &manifest) != nil {
+		return "", "", "", errors.New("supply a valid package.json")
+	}
+	if manifest.Manager != "" {
+		manager, version, _ = strings.Cut(manifest.Manager, "@")
+		version, _, _ = strings.Cut(version, "+")
+		if !packageVer.MatchString(version) {
+			return "", "", "", errors.New("declare an exact supported packageManager version in package.json")
 		}
 	}
-	if len(present) == 0 {
-		return errors.New("approved base has no Node lockfile")
+	for _, name := range nodeLockfiles {
+		data, ok := files[name]
+		if !ok {
+			continue
+		}
+		argv := nodeFetchArgv(name, data)
+		if manager != "" && manager != argv[0] {
+			continue
+		}
+		if lock != "" && name != "npm-shrinkwrap.json" {
+			return "", "", "", errors.New("competing locks: declare a matching packageManager and keep one lockfile for that manager")
+		}
+		lock = name
+	}
+	if lock == "" {
+		return "", "", "", errors.New("commit a supported lockfile matching packageManager in package.json")
+	}
+	manager = nodeFetchArgv(lock, files[lock])[0]
+	if manager == "yarn" && version != "" && strings.HasPrefix(version, "1.") == bytes.Contains(files[lock], []byte("__metadata:")) {
+		return "", "", "", errors.New("use a Yarn lockfile matching the declared Yarn major version")
+	}
+	return lock, manager, version, nil
+}
+
+func nodeManagerMatches(lock string, data []byte, observed, declared string) bool {
+	if !packageVer.MatchString(observed) || (declared != "" && observed != declared) {
+		return false
+	}
+	return lock != "yarn.lock" || strings.HasPrefix(observed, "1.") != bytes.Contains(data, []byte("__metadata:"))
+}
+
+// nodePrefetch runs only the selected fetch-only command in a sanitized copy.
+func nodePrefetch(ctx context.Context, req prefetchRequest) error {
+	lock, _, _, err := readinessNodeFlow(req.Files)
+	if err != nil {
+		return err
 	}
 	if refused := nodeGitDependencies(req.Files); len(refused) > 0 {
 		return fmt.Errorf("git-hosted dependencies cannot be fetched without running package code: %s", strings.Join(refused, "; "))
+	}
+	for name, data := range req.Manifests {
+		if readinessNodeProtocol(data) {
+			return fmt.Errorf("%s: replace Git and executable package protocols before preparation", name)
+		}
+	}
+	for _, name := range []string{lock, "package.json", "pnpm-workspace.yaml"} {
+		if readinessNodeProtocol(req.Files[name]) {
+			return fmt.Errorf("%s: replace Git and executable package protocols before preparation", name)
+		}
 	}
 	for _, k := range nodeCacheEnv {
 		if err := os.MkdirAll(filepath.Join(req.Dir, k.Subdir), 0o700); err != nil {
 			return err
 		}
 	}
-	for _, lockfile := range present {
-		if err := nodeFetch(ctx, req, lockfile); err != nil {
-			return err
-		}
-	}
-	return nil
+	return nodeFetch(ctx, req, lock)
 }
 
 func nodeFetch(ctx context.Context, req prefetchRequest, lockfile string) (result error) {
@@ -103,6 +143,9 @@ func nodeFetch(ctx context.Context, req prefetchRequest, lockfile string) (resul
 		files[name] = data
 	}
 	for _, name := range []string{"package.json", "pnpm-workspace.yaml"} {
+		if name == "pnpm-workspace.yaml" && lockfile != "pnpm-lock.yaml" {
+			continue
+		}
 		if data, ok := req.Files[name]; ok {
 			files[name] = data
 		}
@@ -131,13 +174,27 @@ func nodeFetch(ctx context.Context, req prefetchRequest, lockfile string) (resul
 	if err != nil {
 		return err
 	}
-	stdout, stderr, err := runPrefetchCommand(ctx, project, env, nodeFetchArgv(lockfile, req.Files[lockfile]))
+	argv := nodeFetchArgv(lockfile, req.Files[lockfile])
+	_, manager, version, err := readinessNodeFlow(req.Files)
+	if err != nil {
+		return err
+	}
+	if manager == "pnpm" {
+		env = append(env, "npm_config_manage_package_manager_versions=false")
+	}
+	if version != "" || lockfile == "yarn.lock" {
+		out, _, err := runPrefetchCommand(ctx, project, env, []string{manager, "--version"})
+		if err != nil || !nodeManagerMatches(lockfile, req.Files[lockfile], strings.TrimSpace(string(out)), version) {
+			return fmt.Errorf("package.json: install trusted %s %s matching the selected lockfile for dependency preparation (observed %q)", manager, version, strings.TrimSpace(string(out)))
+		}
+	}
+	stdout, stderr, err := runPrefetchCommand(ctx, project, env, argv)
 	if err != nil {
 		detail := nodePrefetchFailure(stdout, stderr, err)
 		for _, p := range []string{req.Dir, tmp} {
 			detail = strings.ReplaceAll(detail, p, "<"+filepath.Base(p)+">")
 		}
-		return fmt.Errorf("%s: %s", lockfile, detail)
+		return fmt.Errorf("%s (%s): install the selected manager and make the locked packages available to trusted preparation: %s", lockfile, manager, detail)
 	}
 	return nil
 }
@@ -149,10 +206,19 @@ func withoutPackageManager(data []byte) ([]byte, error) {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return nil, err
 	}
-	if _, ok := fields["packageManager"]; !ok {
+	_, manager := fields["packageManager"]
+	if !manager && fields["devEngines"] == nil {
 		return data, nil
 	}
 	delete(fields, "packageManager")
+	if fields["devEngines"] != nil {
+		var engines map[string]json.RawMessage
+		if err := json.Unmarshal(fields["devEngines"], &engines); err != nil {
+			return nil, err
+		}
+		delete(engines, "packageManager")
+		fields["devEngines"], _ = json.Marshal(engines)
+	}
 	return json.Marshal(fields)
 }
 

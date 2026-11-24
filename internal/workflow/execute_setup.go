@@ -66,8 +66,14 @@ func (r *workRun) claimRun() error {
 		if r.resumed {
 			r.e.LeaseManager.BindClaim(r.opts.IssueNumber, r.opts.ClaimID)
 			r.st, err = r.e.LeaseManager.Resume(r.ctx, r.opts.IssueNumber, r.opts.Owner, r.opts.ClaimID)
+			if err == nil && r.pre.Readiness != nil {
+				if r.st.BaseSHA != r.pre.BaseSHA {
+					return errors.New("approved task base changed during readiness preflight; rerun swarm issue work")
+				}
+				err = r.checkClaimReadiness(r.st)
+			}
 		} else {
-			r.st, err = r.e.LeaseManager.Acquire(r.ctx, r.opts.IssueNumber, r.opts.Owner, r.primaryAgent, contract.PersistedWorkPhase(r.opts.Phase), r.duration, r.pre.Config.Lease.MaxRenewals)
+			r.st, err = r.e.AcquireAfterPreflight(r.ctx, r.opts, r.pre, r.opts.Owner, r.primaryAgent, contract.PersistedWorkPhase(r.opts.Phase), r.duration)
 		}
 		return err
 	})

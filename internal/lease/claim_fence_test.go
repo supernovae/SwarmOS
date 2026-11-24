@@ -33,6 +33,7 @@ var claimFenceInventory = map[string]string{
 	"AuthorizeGapAcknowledgment":     "read-only authenticated authorization; no durable state write",
 	"RecordGapAcknowledgment":        "",
 	"Acquire":                        "claim acquisition",
+	"AcquireDirectChecked":           "direct claim acquisition with a pre-CAS readiness check",
 	"AcquireFork":                    "claim acquisition",
 	"AcquirePR":                      "claim acquisition",
 	"AcquirePreparedCheckpoint":      "prepared recovery claim acquisition",

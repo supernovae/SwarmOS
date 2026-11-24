@@ -173,9 +173,10 @@ func TestDiscardCheckpointFlags(t *testing.T) {
 }
 
 func TestCLIArchiveCompletion(t *testing.T) {
-	for _, scenario := range []string{"released", "expired", "recorded"} {
+	for _, scenario := range []string{"released", "expired", "recorded", "recorded-json"} {
 		t.Run(scenario, func(t *testing.T) {
-			recorded := scenario == "recorded"
+			asJSON := scenario == "recorded-json"
+			recorded := scenario == "recorded" || asJSON
 			f := newCLIFixture(t)
 			n := f.create(t, "agent")
 			ctx := t.Context()
@@ -228,13 +229,21 @@ func TestCLIArchiveCompletion(t *testing.T) {
 			}
 			args := []string{"issue", "archive-completion", number, "--expected-receipt", changed.ReceiptID}
 			assertNextAction(t, doc, err, ReasonCompletionInputsChanged, true, ExitFailure, append([]string{"swarm"}, args...)...)
-			out := f.must(t, args...)
 			ref := "refs/swarm/local-completions/issue-" + number + "/" + candidate
-			if !strings.Contains(out, ref) || prGit(t, f.root, "rev-parse", ref) != candidate {
-				t.Fatalf("candidate retention: %s", out)
+			if asJSON {
+				out, err := f.runJSON(t, append(args, "--json")...)
+				if err != nil || out["kind"] != "completion-archive" ||
+					out["candidate"] != candidate || out["retention_ref"] != ref || out["already_recorded"] != true {
+					t.Fatalf("structured archive: %v, %v", out, err)
+				}
+			} else {
+				out := f.must(t, args...)
+				if !strings.Contains(out, ref) || strings.Contains(out, "already recorded") != recorded || strings.Contains(out, "--dry-run") == recorded {
+					t.Fatalf("recovery guidance: %s", out)
+				}
 			}
-			if strings.Contains(out, "already recorded") != recorded || strings.Contains(out, "--dry-run") == recorded {
-				t.Fatalf("recovery guidance: %s", out)
+			if prGit(t, f.root, "rev-parse", ref) != candidate {
+				t.Fatalf("candidate not retained at %s", ref)
 			}
 			if _, err := f.run(args...); !errors.Is(err, lease.ErrClaimFence) || !strings.Contains(err.Error(), "no matching pending completion receipt") {
 				t.Fatalf("repeat archive: %v", err)
@@ -242,6 +251,11 @@ func TestCLIArchiveCompletion(t *testing.T) {
 		})
 	}
 	f := newCLIFixture(t)
+	out, err := f.runJSON(t, "issue", "archive-completion", "1", "--json")
+	if err == nil || out["kind"] != "completion-archive" || out["status"] != "failed" ||
+		out["error"] != "--expected-receipt is required" {
+		t.Fatalf("structured refusal: %v, %v", out, err)
+	}
 	help := f.must(t, "issue", "archive-completion", "--help")
 	for _, want := range []string{"--expected-receipt", "maintainer", "original coordinator checkout"} {
 		if !strings.Contains(help, want) {

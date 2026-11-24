@@ -1212,13 +1212,22 @@ func (m *Manager) AcquirePR(ctx context.Context, n, number int, owner, agent, ph
 		}
 		return st, nil
 	}
-	return m.acquire(ctx, n, number, owner, agent, phase, duration, max)
+	return m.acquire(ctx, n, number, owner, agent, phase, duration, max, nil)
 }
 func (m *Manager) Acquire(ctx context.Context, n int, owner, agent, phase string, duration time.Duration, max int) (*IssueState, error) {
-	return m.acquire(ctx, n, 0, owner, agent, phase, duration, max)
+	return m.acquire(ctx, n, 0, owner, agent, phase, duration, max, nil)
 }
 
-func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, phase string, duration time.Duration, max int) (*IssueState, error) {
+// AcquireDirectChecked checks the final approved candidate before saving a
+// direct claim. The original state revision remains the CAS expectation.
+func (m *Manager) AcquireDirectChecked(ctx context.Context, n int, owner, agent, phase string, duration time.Duration, max int, check func(*IssueState) error) (*IssueState, error) {
+	if m.gateway != nil {
+		return nil, errors.New("checked acquisition requires direct coordination")
+	}
+	return m.acquire(ctx, n, 0, owner, agent, phase, duration, max, check)
+}
+
+func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, phase string, duration time.Duration, max int, check func(*IssueState) error) (*IssueState, error) {
 	if m.gateway != nil {
 		st, err := m.gateway.Apply(ctx, ForkRequest{
 			Version:     1,
@@ -1281,6 +1290,9 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 	if err := m.DecompositionAdmission(ctx, st); err != nil {
 		return nil, err
 	}
+	if check != nil && !directIssue(st) {
+		return nil, errors.New("checked acquisition requires a direct issue")
+	}
 	if st.PRRevision != nil && prNumber != st.PRRevision.Number {
 		return nil, fmt.Errorf("issue #%d has a pending PR revision; use swarm pr work %d", n, st.PRRevision.Number)
 	}
@@ -1319,16 +1331,32 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 	}
 	predecessorClaim, predecessorTask := st.Lease.ClaimID, st.TaskDigest
 	diagnosticEligible := prNumber == 0 && directIssue(st)
+	previousBase := st.BaseSHA
 	if fresh {
-		previousBase := st.BaseSHA
 		st, err = m.prepareClaimBase(ctx, n, st, wu, cfg)
 		if err != nil {
 			return nil, err
 		}
-		if st.BaseSHA != previousBase {
-			if err := m.denyResume(n); err != nil {
-				return nil, err
-			}
+	}
+	if check != nil {
+		// The callback inspects an independent snapshot. Only this manager
+		// may update the authoritative state before CAS.
+		raw, err := json.Marshal(st)
+		if err != nil {
+			return nil, err
+		}
+		var candidate IssueState
+		if err := json.Unmarshal(raw, &candidate); err != nil {
+			return nil, err
+		}
+		if err := check(&candidate); err != nil {
+			return nil, err
+		}
+		now = m.nowFn()
+	}
+	if st.BaseSHA != previousBase {
+		if err := m.denyResume(n); err != nil {
+			return nil, err
 		}
 	}
 	id := claimID()

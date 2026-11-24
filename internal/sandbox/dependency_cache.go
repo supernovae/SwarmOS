@@ -1181,3 +1181,49 @@ func cargoFetchFailure(stderr []byte, runErr error) string {
 func prefetchTemp(ctx context.Context, parent, pattern string) (string, error) {
 	return storageuse.MkdirTemp(ctx, parent, pattern, "prefetch-scratch")
 }
+
+// InspectDependencyCaches exposes existing repository stores for an offline
+// probe. It never creates a cache or treats a prefetch marker as readiness.
+func InspectDependencyCaches(ctx context.Context, worktree string, policy DependencyPolicy) (Dependencies, error) {
+	deps := Dependencies{Mode: policy.Mode}
+	if policy.Mode == SharedHostCaches {
+		return deps, nil
+	}
+	base, err := userCacheDir()
+	if err != nil {
+		return deps, err
+	}
+	key, err := repositoryCacheKey(ctx, worktree)
+	if err != nil {
+		return deps, err
+	}
+	keyRel := filepath.Join("swarm", string(AgentDependencyCache), key)
+	if insideDir(worktree, filepath.Join(base, keyRel)) {
+		return deps, errors.New("dependency cache directory is inside the worktree")
+	}
+	root, err := safefs.Open(base)
+	if errors.Is(err, os.ErrNotExist) {
+		return deps, nil
+	}
+	if err != nil {
+		return deps, err
+	}
+	defer root.Close()
+	for _, eco := range dependencyEcosystems {
+		if eco.Prefetch == nil {
+			continue
+		}
+		rel := filepath.Join(keyRel, eco.Name)
+		if err := checkCacheDir(root, rel, false); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return deps, err
+		}
+		dir := filepath.Join(base, rel)
+		if err := acquireCacheUse(ctx, key, string(AgentDependencyCache), dir); err != nil {
+			return deps, err
+		}
+		deps.Caches = append(deps.Caches, DependencyCache{Ecosystem: eco.Name, EnvKey: eco.envKey(), Dir: dir})
+	}
+	return deps, nil
+}

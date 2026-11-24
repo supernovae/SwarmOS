@@ -52,6 +52,9 @@ func (r *workRun) developerRound(round int, targets []string) (paused bool, err 
 		r.pre.ToolCapabilities["developer"] = sandbox.PreparedCapabilities(capabilities, r.deps)
 	}
 
+	if err := r.checkLaunchReadiness("developer", developer); err != nil {
+		return false, err
+	}
 	r.res.RoleAgentsUsed["developer"] = developer
 	devRunner, err := r.e.configuredRunner(r.ctx, developer, r.cfg, r.e.Tracker.BackendName() == "local")
 	if err != nil {

@@ -4,15 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/supernovae/swarmos/internal/storageuse"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"gopkg.in/yaml.v3"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
@@ -340,5 +343,110 @@ func TestBrowserProfilePreflightNoClaim(t *testing.T) {
 	}
 	if !strings.Contains(result.BrowserProfile, "unavailable") || len(result.Blockers) == 0 {
 		t.Fatalf("inspection lost browser blocker: %+v", result)
+	}
+}
+
+func TestReadinessPreclaim(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("readiness admission is scoped to Linux")
+	}
+	eng, root, issue := approvedDependencyTask(t)
+	eng.LookupEnv = func(string) (string, bool) { return "", false }
+	cfg, err := harness.LoadConfig(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Execution = contract.ExecutionConfig{Mode: contract.ExecutionIsolated, Backend: contract.BackendNative}
+	missing := filepath.Join(t.TempDir(), "missing-selected-codex")
+	ac := cfg.Agents["codex"]
+	ac.Binary = missing
+	cfg.Agents["codex"] = ac
+	raw, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".swarm", "config.yaml"), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "package.json"), []byte(`{"name":"fixture","version":"1.0.0"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", ".swarm/config.yaml", "package.json"}, {"commit", "-qm", "approved fixture project"}} {
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	approved, err := eng.LeaseManager.ApproveTask(t.Context(), issue, "local-dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng.inspectAgent = func(string, *contract.SwarmConfig, bool, string, agent.RunnerOptions, string) (string, sandbox.ToolCapabilityReport, error) {
+		return "fixture", sandbox.ToolCapabilityReport{}, nil
+	}
+	prefetched, launched := false, false
+	stubAgentDependencies(t, func(context.Context, contract.ExecutionConfig, string, string, sandbox.DependencyPolicy) (sandbox.Dependencies, error) {
+		prefetched = true
+		return sandbox.Dependencies{}, nil
+	})
+	eng.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+		launched = true
+		return nil, errors.New("agent launch was reached")
+	}
+	_, err = eng.ExecuteWork(t.Context(), WorkOptions{RepoRoot: root, IssueNumber: issue, AgentName: "codex", Phase: "all", Headless: true})
+	if err == nil || !strings.Contains(err.Error(), "developer readiness") || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("expected selected environment to fail readiness: %v", err)
+	}
+	st, err := eng.LeaseManager.GetCurrentState(t.Context(), issue)
+	if err != nil || st.Lease.ClaimID != approved.Lease.ClaimID || !prefetched || launched {
+		t.Fatalf("state=%+v err=%v prefetched=%t launched=%t", st, err, prefetched, launched)
+	}
+	probe := func(ctx context.Context, projects []sandbox.ReadinessProject, name, role string, _ *contract.SwarmConfig, _ bool, _ agent.RunnerOptions, _ sandbox.Dependencies, deferred string) ([]sandbox.ReadinessRow, error) {
+		return sandbox.CheckReadiness(ctx, projects, role, name, "fixture", deferred, func(_ context.Context, _, command string, out, _ io.Writer) error {
+			if !strings.Contains(command, "node --version") {
+				return fmt.Errorf("unexpected command %s", command)
+			}
+			_, err := io.WriteString(out, "/bin/node\nv24.1.0\n")
+			return err
+		})
+	}
+	eng.probeReadiness = probe
+	_, err = eng.ExecuteWork(t.Context(), WorkOptions{RepoRoot: root, IssueNumber: issue, AgentName: "codex", Phase: "all", Headless: true})
+	if err == nil || launched || !strings.Contains(err.Error(), "commit a supported lockfile") {
+		t.Fatalf("required unverified check did not stop fresh work: %v", err)
+	}
+	st, err = eng.LeaseManager.GetCurrentState(t.Context(), issue)
+	if err != nil || st.Lease.ClaimID != approved.Lease.ClaimID {
+		t.Fatalf("unverified readiness touched claim state: state=%+v err=%v", st, err)
+	}
+	eng.probeReadiness = nil
+	claimed, err := eng.LeaseManager.Acquire(t.Context(), issue, "local-dev", "codex", "plan", time.Hour, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := WorkOptions{RepoRoot: root, IssueNumber: issue, AgentName: "codex", Phase: "all", Headless: true, ClaimID: claimed.Lease.ClaimID}
+	_, err = eng.ExecuteWork(t.Context(), opts)
+	if err == nil || !strings.Contains(err.Error(), "developer readiness") || launched {
+		t.Fatalf("resumption should also fail readiness before launch: %v", err)
+	}
+	r := workRun{ctx: t.Context(), e: eng, opts: opts, cfg: cfg, st: claimed, pre: &PreflightResult{
+		Readiness: &sandbox.ReadinessReport{Input: "approved base " + claimed.BaseSHA},
+		Agents:    map[string]string{"tester": "codex"},
+	}}
+	if err := r.checkLaunchReadiness("developer", "codex"); err == nil || !strings.Contains(err.Error(), "developer readiness") {
+		t.Fatalf("late developer should be checked separately: %v", err)
+	}
+
+	eng.probeReadiness = probe
+	preview, err := eng.checkIssueReadiness(t.Context(), WorkOptions{RepoRoot: root}, cfg, approved.BaseSHA, sandbox.Dependencies{}, map[string]string{"developer": "codex"}, nil)
+	if err == nil || preview.Outcome != "blocked" || len(preview.Rows) == 0 ||
+		preview.Rows[0].Status != "unverified" || !preview.Rows[0].Required || !strings.Contains(err.Error(), "commit a supported lockfile") {
+		t.Fatalf("required unverified check did not block: report=%+v err=%v", preview, err)
+	}
+	_, err = eng.ExecuteWork(t.Context(), opts)
+	if err == nil || launched || !strings.Contains(err.Error(), "commit a supported lockfile") {
+		t.Fatalf("required unverified check did not stop resumption: %v", err)
+	}
+	if err := r.checkLaunchReadiness("tester", "codex"); err == nil || !strings.Contains(err.Error(), "commit a supported lockfile") {
+		t.Fatalf("required unverified check did not stop late tester launch: %v", err)
 	}
 }

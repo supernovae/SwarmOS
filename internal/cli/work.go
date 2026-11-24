@@ -188,6 +188,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 						fmt.Fprintf(cmd.OutOrStdout(), "Claim: %s (%s); expiry=%s\nResume at: %s\nValidation reuse: %s (%s)\nAcceptance evidence: %s\nSubmission ready: %t\n", c.Claim, c.ClaimReason, c.ExpiresAt.Format(time.RFC3339), c.ResumeRole, c.ValidationReuse, c.ValidationReason, c.AcceptanceEvidence, c.SubmissionReady)
 					}
 					fmt.Fprintf(cmd.OutOrStdout(), "Issue #%d; policy=approved_task (approved task policy); base=%s; execution=%s/%s\n", opts.IssueNumber, preflight.BaseSHA, preflight.Execution.Mode, preflight.Execution.Backend)
+					writeReadiness(cmd.OutOrStdout(), preflight.Readiness)
 					for _, row := range preflight.RolePreview {
 						detail := row.Reason
 						if row.Disposition == "selected" {
@@ -356,5 +357,20 @@ func writePromptScaffoldReport(out io.Writer, report *workflow.PromptScaffoldRep
 	}
 	for _, action := range report.NextActions {
 		fmt.Fprintln(out, action)
+	}
+}
+
+func writeReadiness(out io.Writer, report *sandbox.ReadinessReport) {
+	if report == nil || report.Outcome == "" {
+		return
+	}
+	fmt.Fprintf(out, "Project readiness (%s): %s\n", report.Input, report.Outcome)
+	for _, row := range report.Rows {
+		fmt.Fprintf(out, "  %s (%s/%s) %s %s %s: %s (%s)", row.Role, row.Agent, row.Boundary, row.Project, row.Ecosystem, row.Check, row.Status, row.Reason)
+		fmt.Fprintf(out, " [source %q]", row.Source)
+		if row.Observed != "" {
+			fmt.Fprintf(out, " [%q]", row.Observed)
+		}
+		fmt.Fprintln(out)
 	}
 }

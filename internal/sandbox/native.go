@@ -1297,3 +1297,30 @@ func (s *InspectionSession) InspectDelegatedHarnessForLaunch(ctx context.Context
 	guard, err := s.launchGuard(binary, result.identity)
 	return result.version, guard, err
 }
+
+// RunNativeReadiness runs a coordinator-authored probe under the native role's
+// filesystem policy without starting a model session.
+func RunNativeReadiness(ctx context.Context, dir, binary, command string, opts WorkerOptions, stdout, stderr io.Writer) error {
+	inspected, err := opts.Inspections.inspectNativeCodex(ctx, binary, opts.InspectionPolicy)
+	if err != nil {
+		return err
+	}
+	guard, err := opts.Inspections.launchGuard(binary, inspected.identity)
+	if err != nil {
+		return err
+	}
+	opts.DiscardChanges = true
+	return withNativeWorkspace(ctx, dir, opts, func(ctx context.Context, work, scratch string) error {
+		caches, err := agentBuildCaches(ctx, dir, scratch, opts)
+		if err != nil {
+			return err
+		}
+		args := codexPolicy(binary, work, scratch, false, caches, opts.Dependencies)
+		args = append(args, "sandbox", "-C", work, "-P", "swarm", "--", "/bin/sh", "-c", command)
+		if err := guard(); err != nil {
+			return err
+		}
+		env := append(nativeEnv(codexHostHome(scratch), false, opts.Dependencies), "CODEX_HOME="+filepath.Join(scratch, "codex-config"))
+		return runNativeCommand(ctx, binary, scratch, env, args, nil, stdout, stderr)
+	})
+}

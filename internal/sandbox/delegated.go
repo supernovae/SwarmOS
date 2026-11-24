@@ -311,3 +311,19 @@ func prepareOpenCode(control, executable string, toolArgs, env []string) ([]stri
 	filtered = append(filtered, "XDG_CONFIG_HOME="+filepath.Dir(config))
 	return filtered, nil
 }
+
+// RunDelegatedReadiness uses the shell executor that OpenCode delegates to.
+func RunDelegatedReadiness(ctx context.Context, dir, command string, opts WorkerOptions, stdout, stderr io.Writer) error {
+	if err := checkToolExecutor(ctx, opts.BrowserProfile); err != nil {
+		return err
+	}
+	opts.DiscardChanges = true
+	return withNativeWorkspace(ctx, dir, opts, func(ctx context.Context, work, scratch string) error {
+		caches, err := agentBuildCaches(ctx, dir, scratch, opts)
+		if err != nil {
+			return err
+		}
+		executor := ToolExecutor{BrowserProfile: opts.BrowserProfile, Work: work, BuildCaches: caches, Dependencies: opts.Dependencies}
+		return executor.Run(ctx, command, stdout, stderr)
+	})
+}

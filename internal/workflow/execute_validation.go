@@ -63,6 +63,9 @@ func (r *workRun) validationRoundWithReuse(round int, reuseChecks bool) (paused 
 	if !checksFirst || (err == nil && report.Passed) {
 		r.progress.next("test")
 		tester := r.pre.Agents["tester"]
+		if err := r.checkLaunchReadiness("tester", tester); err != nil {
+			return false, err
+		}
 		r.res.RoleAgentsUsed["tester"] = tester
 		var testerRunner agent.Runner
 		testerRunner, err = r.e.configuredRunner(r.ctx, tester, r.cfg, r.e.Tracker.BackendName() == "local")

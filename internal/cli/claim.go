@@ -44,7 +44,7 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 		reporter := workflow.NewProgressReporter(cmd.Context(), workProgressPrinter(cmd.ErrOrStderr()))
 		defer reporter.Close()
 		if next {
-			pulled, err := pullNextReadyIssue(cmd.Context(), cmd, rootOpts, allRepos, workflow.WorkOptions{AgentName: agentName, Phase: "all", SetupProgress: reporter}, duration)
+			pulled, err := pullNextReadyIssue(cmd.Context(), cmd, rootOpts, allRepos, workflow.WorkOptions{ManualClaim: true, AgentName: agentName, Phase: "all", SetupProgress: reporter}, duration)
 			if err != nil {
 				var noReady *noReadyError
 				if !asJSON && errors.As(err, &noReady) {
@@ -69,7 +69,7 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 			return err
 		}
 		engine := workflow.NewEngineWithManagerOptions(root, tr, manager, cfg, rootOpts.Fork, rootOpts.effectiveForkRemote(), rootOpts.engineOptions())
-		preflight, err := engine.PreflightForClaim(cmd.Context(), workflow.WorkOptions{RepoRoot: root, IssueNumber: issue, AgentName: agentName, Phase: "plan"})
+		preflight, err := engine.PreflightForClaim(cmd.Context(), workflow.WorkOptions{ManualClaim: true, RepoRoot: root, IssueNumber: issue, AgentName: agentName, Phase: "plan"})
 		if err != nil {
 			return err
 		}

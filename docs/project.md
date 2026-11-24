@@ -404,11 +404,15 @@ Sandboxes find the wheels through `PIP_FIND_LINKS`, so `pip install --no-index -
 
 #### Node
 
-For Node, a `package-lock.json`, `pnpm-lock.yaml` or `yarn.lock` at the root of the approved base turns the cache on. Each lockfile present gets its own fetch-only command, run in a temporary copy that holds only that lockfile, `pnpm-workspace.yaml` and the base's `package.json` files:
+For Node, commit a supported lockfile at the repository root. If the checkout
+has competing locks, declare the intended manager and exact version in
+`package.json` using `packageManager`. SwarmOS prepares the matching lock
+in a temporary copy with the approved package manifests and any pnpm workspace
+declaration. npm uses `npm-shrinkwrap.json` when both npm lockfiles are present.
 
 | Lockfile | Command | Sandbox variable |
 | --- | --- | --- |
-| `package-lock.json` | `npm ci --ignore-scripts --no-audit --no-fund` | `npm_config_cache` = `<cache>/npm` |
+| `package-lock.json` or `npm-shrinkwrap.json` | `npm ci --ignore-scripts --no-audit --no-fund` | `npm_config_cache` = `<cache>/npm` |
 | `pnpm-lock.yaml` | `pnpm fetch --frozen-lockfile` | `npm_config_store_dir` = `<cache>/pnpm-store` |
 | `yarn.lock` (Yarn 1) | `yarn install --frozen-lockfile --ignore-scripts --non-interactive` | `YARN_CACHE_FOLDER` = `<cache>/yarn` |
 | `yarn.lock` (Yarn 2 and later) | `yarn install --immutable --mode=skip-build` | `YARN_CACHE_FOLDER` = `<cache>/yarn` |
@@ -419,7 +423,7 @@ Node has these limits:
 
 - Git-hosted dependencies (`git+`, `github:`, codeload tarballs and Yarn `#commit=`) are refused before anything runs, because fetching them runs their `prepare` script. The error names each one.
 - Private registries that need credentials are not supported, because no npmrc or token reaches the prefetch.
-- pnpm and Yarn must already be installed on the host; the prefetch never downloads them. Only npm installs from the read-only cache are covered by tests so far, so pnpm and Yarn installs from a read-only store or cache are not yet verified.
+- Install the selected npm, pnpm or Yarn release on the preparation host and make it visible in the selected isolated environment. Use the lockfile format for that release. Independent nested locks need a root workspace lock or an operator-provisioned offline environment.
 - Playwright and Cypress browser downloads are not lockfile packages, so their host caches stay mounted read-only (`node-browsers` below).
 
 Other ecosystems have no fetch-only download command yet, so they keep read-only access to your host caches, as before:
@@ -479,6 +483,50 @@ A CLI `--gate` flag can always make review stricter (for example, upgrading `non
 - **[Working with OpenAI Dot & Codex (`docs/openai-dot.md`)](openai-dot.md)** — Configure Codex Cloud environments and remote repositories for OpenAI Dots.
 - **[Workflows & Review Gates (`docs/WORKFLOWS.md`)](WORKFLOWS.md)** — Role prompts, artifacts, and gate transitions.
 - **[Architecture (`docs/ARCHITECTURE.md`)](ARCHITECTURE.md)** — Git-CAS coordination, fencing, and worktree lifecycle.
+
+### Project readiness
+
+On a fresh Linux worker, start by checking the tools and offline packages
+visible to the selected developer and tester.
+
+1. Run `swarm repo doctor` to inspect the current checkout and any stores
+   already on the worker. Install the required tool versions and provision
+   operator-managed stores reported by doctor.
+2. Run `swarm issue work <number> --dry-run` to see the approved commit,
+   detected projects, selected role environments, and checks awaiting execution.
+3. Run `swarm issue work <number>`. For native Codex and Bubblewrap-backed
+   OpenCode, SwarmOS prepares supported lockfiles on the host and checks the
+   resulting read-only stores inside the selected worker environments.
+   Required checks that fail or remain unverified block the affected work.
+
+For a Node project, check the Node version, the selected package manager and
+the locked packages in that order. For example, if `package.json` specifies
+`engines.node: ">=24"`, make Node 24 or a compatible newer version visible
+in the worker. If npm is missing, install the release required by
+`packageManager`. If a locked package is missing, make the package available
+to the preparation host or include it in the offline image.
+
+For Python, provide a compatible interpreter and binary wheels for supported
+`requirements*.txt` or `uv.lock` inputs. For C and C++, put declared headers
+and libraries on the isolated compiler and linker search paths. For .NET,
+provide the SDK, reference packs and local NuGet packages.
+
+For Maven, provide Java, Maven and the literal JAR dependencies and their POMs
+in the local repository. For Gradle, supply Java and Gradle, match any
+declared wrapper distribution version, and provision the locked JARs in
+the local Gradle cache. These checks cover supported static declarations and artifact presence.
+Java projects that rely on build scripts, plugins or inherited dependencies
+may need a setup step beyond the static checks.
+
+To supply tools and dependencies together, provision a local OCI image and set
+`execution.backend: oci`, `execution.container_runtime` to `docker` or
+`podman`, and `execution.container_image` to the image's digest-pinned
+reference. Set `authentication: none` on each selected offline agent entry.
+Include the tools and stores in the selected image. Set `PIP_FIND_LINKS` to
+the in-image wheel directory for Python. If Java stores are outside the
+worker's standard locations, set `SWARM_MAVEN_REPOSITORY` to the in-image
+Maven repository or `SWARM_GRADLE_CACHES` to the in-image Gradle cache
+directory.
 
 ### Task-local browser previews
 

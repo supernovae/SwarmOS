@@ -95,3 +95,8 @@ Read-only roles may see write tool names, but workspace writes remain denied.
 Dependency preparation supplies read-only caches and resolved toolchain mounts;
 it does not grant agent network access. Node capability labels and WorkUnit
 `required_capabilities` continue to select workers independently of this report.
+
+On Linux, direct isolated issue work checks project tools through OpenCode's
+Bubblewrap tool boundary before claiming work and again before role launch. Run `swarm repo doctor`
+to check the environment against your checkout. See
+[project readiness](../project.md#project-readiness) for tool and package setup.

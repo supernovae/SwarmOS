@@ -296,10 +296,14 @@ func migrateLegacyGoCache(ctx context.Context, root *safefs.Root, base, key, rel
 // cache. Sub rejects symlinked or non-directory components, and no component
 // may be writable by other users, so the cache cannot be redirected.
 func privateCacheDir(root *safefs.Root, rel string) error {
+	return checkCacheDir(root, rel, true)
+}
+
+func checkCacheDir(root *safefs.Root, rel string, create bool) error {
 	prefix := ""
 	for _, part := range strings.Split(rel, string(filepath.Separator)) {
 		prefix = filepath.Join(prefix, part)
-		dir, err := root.Sub(prefix, true, 0o700)
+		dir, err := root.Sub(prefix, create, 0o700)
 		if err != nil {
 			return err
 		}

@@ -45,7 +45,10 @@ func TestDryRunReportsIsolationBlockersWithoutClaim(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.root, ".swarm", "config.yaml"), data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"add", ".swarm/config.yaml"}, {"commit", "-m", "configure unavailable test harness"}} {
+	if err := os.WriteFile(filepath.Join(f.root, "package.json"), []byte(`{"name":"approved","version":"1.0.0"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", ".swarm/config.yaml", "package.json"}, {"commit", "-m", "configure unavailable test harness"}} {
 		if out, err := gitfixture.Command(t, "", append([]string{"-C", f.root}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
@@ -61,6 +64,14 @@ func TestDryRunReportsIsolationBlockersWithoutClaim(t *testing.T) {
 	}
 	if result.Plan.Execution.Mode != contract.ExecutionIsolated || result.Plan.Execution.Backend != contract.BackendNative || len(result.Plan.Blockers) == 0 {
 		t.Fatalf("missing default boundary diagnostics: %+v", result.Plan)
+	}
+	if result.Plan.Readiness == nil || len(result.Plan.Readiness.Rows) == 0 || result.Plan.Readiness.Input != "approved base "+result.Plan.BaseSHA || result.Plan.Readiness.Outcome != "unverified" {
+		t.Fatalf("missing approved readiness report: %+v", result.Plan.Readiness)
+	}
+	for _, row := range result.Plan.Readiness.Rows {
+		if row.Status != "unverified" || row.Required {
+			t.Fatalf("dry-run executed a probe: %+v", row)
+		}
 	}
 	issue, _ := strconv.Atoi(n)
 	if st := f.state(t, issue); st.Lease.Status == "active" || st.Lease.ClaimID != "" {

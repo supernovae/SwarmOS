@@ -65,6 +65,7 @@ func newDiscardCheckpointCmd(rootOpts *RootOptions) *cobra.Command {
 
 func newArchiveCompletionCmd(rootOpts *RootOptions) *cobra.Command {
 	var expectedReceipt string
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "archive-completion <issue-number>",
 		Short: "Archive a stale completion receipt in the original coordinator checkout (maintainer only)",
@@ -73,7 +74,8 @@ func newArchiveCompletionCmd(rootOpts *RootOptions) *cobra.Command {
 			"A maintainer with issue approval authority must run this command.\n" +
 			"Copy the full --expected-receipt selector from the completion recovery diagnostic.",
 		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+			defer func() { reportJSONFailure(cmd, asJSON, "completion-archive", runErr) }()
 			number, err := parseNumberArg(args[0], "issue")
 			if err != nil {
 				return err
@@ -92,6 +94,12 @@ func newArchiveCompletionCmd(rootOpts *RootOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if asJSON {
+				return writeJSON(cmd, map[string]any{
+					"kind": "completion-archive", "issue_number": number,
+					"candidate": result.Candidate, "retention_ref": result.RetentionRef, "already_recorded": result.AlreadyRecorded,
+				})
+			}
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "Archived completion for issue #%d. Candidate %s retained locally at %s.\n", number, result.Candidate, result.RetentionRef)
 			fmt.Fprintf(out, "Inspect current state with swarm issue status %d.\n", number)
@@ -104,5 +112,6 @@ func newArchiveCompletionCmd(rootOpts *RootOptions) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&expectedReceipt, "expected-receipt", "", "Full SHA-256 selector from the completion diagnostic (required)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured archive results")
 	return cmd
 }

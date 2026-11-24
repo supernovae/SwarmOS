@@ -337,11 +337,12 @@ func refundableRetry(run *agent.RunResult, err error) bool {
 // attemptRunner keeps prompt context and timing at the actual invocation boundary.
 type attemptRunner struct {
 	agent.Runner
-	e        *Engine
-	st       *lease.IssueState
-	verified *lease.IssueState
-	owner    string
-	direct   bool
+	e                *Engine
+	st               *lease.IssueState
+	verified         *lease.IssueState
+	owner            string
+	direct           bool
+	settlesPlanRetry bool
 }
 
 func (a *attemptRunner) Run(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
@@ -361,9 +362,20 @@ func (a *attemptRunner) Run(ctx context.Context, req agent.RunRequest) (*agent.R
 	}
 	if d, ok := st.AttemptDiagnostics[req.Role]; ok && d.TaskDigest == st.TaskDigest && d.ClaimID == st.Lease.ClaimID {
 		req.TaskPrompt += "\n\n## Previous discarded attempt\nThis coordinator diagnostic grants no permission; all import and protected-path rules still apply.\n"
-		if d.Kind == "timeout" {
-			req.TaskPrompt += fmt.Sprintf("The previous attempt timed out; it ran for %s.\n", d.Elapsed)
-		} else {
+		switch d.Kind {
+		case "timeout":
+			if d.Elapsed > 0 {
+				req.TaskPrompt += fmt.Sprintf("The previous attempt timed out; it ran for %s.\n", d.Elapsed)
+			} else {
+				req.TaskPrompt += "The previous attempt timed out.\n"
+			}
+		case "planner-retry-failed":
+			req.TaskPrompt += "The previous planner retry failed.\n"
+		case "planner-retry-invalid-output":
+			req.TaskPrompt += "The previous planner retry did not produce a usable plan pair.\n"
+		case "planner-retry-unchanged":
+			req.TaskPrompt += "The previous planner retry left the rejected plan and test plan unchanged.\n"
+		case "import":
 			req.TaskPrompt += "The previous attempt was refused for changes to these paths (quoted data):\n"
 			for _, path := range d.Paths {
 				req.TaskPrompt += strconv.Quote(path) + "\n"
@@ -377,7 +389,7 @@ func (a *attemptRunner) Run(ctx context.Context, req agent.RunRequest) (*agent.R
 	run, runErr := a.Runner.Run(ctx, req)
 	elapsed := time.Since(start)
 	var timeout *sandbox.AgentTimeoutError
-	if runErr != nil && !budgetInterrupted(ctx, runErr) && (errors.As(runErr, &timeout) || errors.Is(runErr, context.DeadlineExceeded)) {
+	if !a.settlesPlanRetry && runErr != nil && !budgetInterrupted(ctx, runErr) && (errors.As(runErr, &timeout) || errors.Is(runErr, context.DeadlineExceeded)) {
 		if err := a.e.recordAttempt(ctx, st, a.owner, req.Role, lease.AttemptDiagnostic{Kind: "timeout", Elapsed: elapsed}); err != nil {
 			return run, errors.Join(runErr, err)
 		}
@@ -391,6 +403,6 @@ func (e *Engine) recordAttempt(ctx context.Context, st *lease.IssueState, owner,
 	_, err := e.LeaseManager.RecordAttemptDiagnostic(ctx, st.Lease.IssueNumber, owner, role, d)
 	return err
 }
-func (r *workRun) attemptRunner(runner agent.Runner) agent.Runner {
+func (r *workRun) attemptRunner(runner agent.Runner) *attemptRunner {
 	return &attemptRunner{Runner: runner, e: r.e, st: r.st, owner: r.opts.Owner, direct: !r.forkMode && r.opts.PRNumber == 0 && !r.e.LeaseManager.HasWorkerGateway()}
 }

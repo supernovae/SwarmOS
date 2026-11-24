@@ -235,3 +235,93 @@ func TestRecoveryPatchPrune(t *testing.T) {
 		t.Fatalf("recovery pruning touched diagnostics: %d left", len(entries))
 	}
 }
+
+func TestPlanRetryRecoveryPrivate(t *testing.T) {
+	state := useDiagnosticsState(t)
+	worktree := t.TempDir()
+	const repo = "octo/swarm"
+	id := strings.Repeat("a", 64)
+	payload := []byte(`{"outcome":"settled"}`)
+	if got, err := HasPlanRetryRecovery(worktree, repo, 7); err != nil || got {
+		t.Fatalf("missing record listed: %v %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(state, "swarm", "plan-retries")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("listing created state: %v", err)
+	}
+	if _, err := LoadPlanRetryRecovery(worktree, repo, 7, id); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing record: %v", err)
+	}
+	if err := SavePlanRetryRecovery(worktree, repo, 7, id, payload); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := filepath.Glob(filepath.Join(state, "swarm", "plan-retries", "*", "7", id))
+	if err != nil || len(paths) != 1 {
+		t.Fatalf("private record location: %v %v", paths, err)
+	}
+	path := paths[0]
+	if runtime.GOOS != "windows" {
+		for path, mode := range map[string]os.FileMode{path: 0600, filepath.Dir(path): 0700} {
+			info, err := os.Stat(path)
+			if err != nil || info.Mode().Perm() != mode {
+				t.Fatalf("private mode %o: %v %v", mode, info, err)
+			}
+		}
+	}
+	if got, err := LoadPlanRetryRecovery(worktree, repo, 7, id); err != nil || string(got) != string(payload) {
+		t.Fatalf("round trip: %q %v", got, err)
+	}
+	if present, err := HasPlanRetryRecovery(worktree, repo, 7); err != nil || !present {
+		t.Fatalf("presence: %v %v", present, err)
+	}
+	if _, err := LoadPlanRetryRecovery(worktree, repo+"-other", 7, id); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("record crossed repository scope: %v", err)
+	}
+	for name, bad := range map[string][]byte{
+		"malformed": []byte("{"),
+		"oversized": []byte(`"` + strings.Repeat("x", planRetryRecordLimit) + `"`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := SavePlanRetryRecovery(worktree, repo, 7, id, bad); err == nil {
+				t.Fatal("invalid record accepted on save")
+			}
+			if err := os.WriteFile(path, bad, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadPlanRetryRecovery(worktree, repo, 7, id); err == nil {
+				t.Fatal("invalid record accepted on load")
+			}
+		})
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	mustSymlink(t, filepath.Join(t.TempDir(), "outside"), path)
+	if _, err := LoadPlanRetryRecovery(worktree, repo, 7, id); err == nil || errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("symlink accepted as evidence: %v", err)
+	}
+	if err := SavePlanRetryRecovery(worktree, repo, 7, "../other", payload); err == nil {
+		t.Fatal("accepted path traversal as a retry ID")
+	}
+	if err := SavePlanRetryRecovery(state, repo, 7, id, payload); err == nil {
+		t.Fatal("stored private evidence inside worktree")
+	}
+	if runtime.GOOS == "linux" {
+		cache := t.TempDir()
+		t.Setenv("XDG_CACHE_HOME", cache)
+		originalStateDir := diagnosticsStateDir
+		diagnosticsStateDir = func() (string, error) {
+			return filepath.Join(cache, "swarm", "agent-build", "repository", "go"), nil
+		}
+		err := SavePlanRetryRecovery(worktree, repo, 7, id, payload)
+		diagnosticsStateDir = originalStateDir
+		if !errors.Is(err, unavailableUnsafe) {
+			t.Fatalf("planner-writable cache accepted as private state: %v", err)
+		}
+	}
+	if err := RemovePlanRetryRecovery(worktree, repo, 7, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadPlanRetryRecovery(worktree, repo, 7, id); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("retired record remains visible: %v", err)
+	}
+}

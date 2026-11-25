@@ -24,7 +24,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 	var roleInstructions workflow.WorkOptions
 	var headless, handoff, nextReady, allRepos, jsonOutput, dryRun bool
 	var progressOutput, planCheckpoint bool
-	var expectedHead, candidateHead string
+	var expectedHead, candidateHead, recoverPlanRetry string
 	var outputFormat string
 	cmd := &cobra.Command{
 		Use:   "work [<issue-number>]",
@@ -39,6 +39,11 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 			if jsonOutput && outputFormat == "text" {
 				return fmt.Errorf("--json conflicts with --format=text")
+			}
+			if cmd.Flags().Changed("recover-plan-retry") {
+				if recoverPlanRetry == "" || phase != "plan" || len(args) != 1 || nextReady || allRepos || handoff || rootOpts.Fork || dryRun || planCheckpoint || expectedHead != "" || candidateHead != "" {
+					return fmt.Errorf("--recover-plan-retry requires an explicit direct issue and --phase plan")
+				}
 			}
 			if planCheckpoint || expectedHead != "" || candidateHead != "" {
 				if !planCheckpoint || phase != "plan" || len(args) != 1 || nextReady || allRepos || handoff || rootOpts.Fork || expectedHead == "" || candidateHead == "" {
@@ -72,12 +77,15 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			if handoff && phase != "plan" && phase != "review" {
 				return fmt.Errorf("--handoff requires --phase plan or --phase review")
 			}
-			if jsonOutput && !headless {
+			if jsonOutput && !headless && recoverPlanRetry == "" {
 				return fmt.Errorf("--json requires headless execution")
 			}
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+			if recoverPlanRetry != "" {
+				return runPlanRetryRecovery(cmd, rootOpts, args[0], recoverPlanRetry, jsonOutput)
+			}
 			if planCheckpoint {
 				return runCheckpointPlan(cmd, rootOpts, args[0], workflow.WorkOptions{Version: Version, PlanCheckpoint: true, ExpectedHead: expectedHead, CandidateHead: candidateHead, Phase: phase, PlannerAgent: plannerAgent, AgentName: agentName, Instructions: instructions, PlannerInstructions: roleInstructions.PlannerInstructions, Gate: contract.GateMode(gate)}, dryRun, jsonOutput, progressOutput)
 			}
@@ -216,6 +224,9 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 			result, err := engine.ExecuteWork(cmd.Context(), opts)
 			if result != nil {
+				if result.PlanRetryRecoveryWarning != "" && !jsonOutput && err == nil {
+					fmt.Fprintln(cmd.ErrOrStderr(), "Warning: "+result.PlanRetryRecoveryWarning)
+				}
 				writeValidationSkipNotice(cmd, result.Validation)
 				if result.Validation != nil && result.Validation.Reused {
 					fmt.Fprintln(cmd.ErrOrStderr(), result.Validation.Artifact.Summary)
@@ -225,7 +236,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 				}
 			}
 			opts.SetupProgress.Close()
-			if errors.Is(err, workflow.ErrPlanReviewRejected) && result != nil {
+			if errors.Is(err, workflow.ErrPlanReviewRejected) && !errors.Is(err, workflow.ErrPlanRetryRecovery) && result != nil {
 				recovery := planReviewRecovery(&guidanceOpts, result.State, "issue", opts.IssueNumber)
 				if jsonOutput {
 					return &planRecoveryError{err: err, recovery: recovery, display: directPlanReviewDisplayContext(cmd.Context(), &guidanceOpts, result.State)}
@@ -297,6 +308,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&recoverPlanRetry, "recover-plan-retry", "", "Settle a retained planner retry under its original claim")
 	cmd.Flags().BoolVar(&planCheckpoint, "plan-checkpoint", false, "Plan an explicitly selected preserved checkpoint without reconciling it")
 	cmd.Flags().StringVar(&expectedHead, "expected-head", "", "Full authoritative predecessor checkpoint SHA (requires --plan-checkpoint)")
 	cmd.Flags().StringVar(&candidateHead, "candidate-head", "", "Full clean candidate SHA (requires --plan-checkpoint)")

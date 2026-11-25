@@ -58,6 +58,7 @@ type WorkOptions struct {
 	OnRoleRoutingDrift       func(*RoleRoutingComparison)
 	IssueContinuation        bool
 	RequestedPhase           string
+	RecoverPlanRetry         string
 	PlanCheckpoint           bool
 	ExpectedHead             string
 	CandidateHead            string
@@ -114,6 +115,9 @@ type WorkResult struct {
 	// SplitRecommended reports a run stopped after planning because the
 	// recorded plan recommends splitting the WorkUnit.
 	SplitRecommended bool `json:"split_recommended,omitempty"`
+	// PlanRetryRecoveryWarning reports a local recovery record failure after
+	// the retry outcome has been confirmed in authoritative state.
+	PlanRetryRecoveryWarning string `json:"plan_retry_recovery_warning,omitempty"`
 	// DecomposeCommand is the command the CLI suggests after a split stop.
 	DecomposeCommand string `json:"decompose_command,omitempty"`
 	// PlanReviewers are the reviewer_collaborators asked to review a paused
@@ -703,8 +707,14 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	if scope != nil {
 		defer scope.Complete(&workErr)
 	}
+	if opts.RecoverPlanRetry != "" {
+		return e.recoverPlanRetry(ctx, opts)
+	}
 	if opts.PlanCheckpoint {
 		return e.executeCheckpointPlan(ctx, opts)
+	}
+	if err := e.guardPendingPlanRetry(ctx, opts); err != nil {
+		return nil, err
 	}
 	if !e.ForkMode && !opts.ForkMode && opts.PRNumber == 0 {
 		st, err := e.LeaseManager.GetCurrentState(ctx, opts.IssueNumber)

@@ -89,7 +89,13 @@ func (r *workRun) plan() (bool, error) {
 		if err := r.admit("plan"); err != nil {
 			return true, err
 		}
-		planRun, err := r.attemptRunner(runner).Run(r.ctx, agent.RunRequest{Agent: planner, Role: "planner", Mode: r.mode, WorktreePath: r.wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: revisionTaskPrompt(planPrompt, r.st, r.opts.PRNumber), OperatorInstructions: r.opts.instructionsFor("planner"), Dependencies: r.deps})
+		recoverableRetry := reservationID != "" && r.e.directGitHubPlanRetry(r.opts)
+		attempt := r.attemptRunner(runner)
+		attempt.settlesPlanRetry = recoverableRetry
+		planRun, err := attempt.Run(r.ctx, agent.RunRequest{Agent: planner, Role: "planner", Mode: r.mode, WorktreePath: r.wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: revisionTaskPrompt(planPrompt, r.st, r.opts.PRNumber), OperatorInstructions: r.opts.instructionsFor("planner"), Dependencies: r.deps})
+		if recoverableRetry {
+			return r.settlePlannerOutcome(planner, planRun, err)
+		}
 		if settleErr := r.settleRetry(reservationID, planRun, err); settleErr != nil {
 			return true, settleErr
 		}
@@ -138,18 +144,20 @@ func (r *workRun) plan() (bool, error) {
 			return true, err
 		}
 
-		r.res.State, r.res.PhaseCompleted = r.st, "plan"
-		if done, err := r.stopForWorkUnitCorrection(); done {
-			return true, err
-		}
-		if done, err := r.stopForSplit(); done {
-			return true, err
-		}
-		if done, err := r.finishPlanHandoff(); done {
-			return true, err
-		}
+		return r.finishRecordedPlan()
 	}
 	return false, nil
+}
+
+func (r *workRun) finishRecordedPlan() (bool, error) {
+	r.res.State, r.res.PhaseCompleted = r.st, "plan"
+	if done, err := r.stopForWorkUnitCorrection(); done {
+		return true, err
+	}
+	if done, err := r.stopForSplit(); done {
+		return true, err
+	}
+	return r.finishPlanHandoff()
 }
 
 func (r *workRun) finishPlanHandoff() (bool, error) {

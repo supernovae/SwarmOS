@@ -1925,3 +1925,388 @@ func TestMaintainerStopRetryLimit(t *testing.T) {
 		})
 	}
 }
+
+type planRetryFaultStore struct {
+	coordination.Store
+	failLoads       atomic.Int32
+	waitForDeadline atomic.Bool
+	loseBeforeWrite atomic.Bool
+	loseWrite       atomic.Bool
+	writes          atomic.Int32
+	afterFault      func(context.Context)
+	beforeFault     func()
+	afterWrite      func()
+}
+
+func (s *planRetryFaultStore) Load(ctx context.Context, n int) ([]byte, string, error) {
+	if loads := s.failLoads.Load(); loads > 0 && s.failLoads.CompareAndSwap(loads, loads-1) {
+		if s.beforeFault != nil {
+			s.beforeFault()
+		}
+		if s.waitForDeadline.Swap(false) {
+			<-ctx.Done()
+			return nil, "", errors.New("Git process interrupted")
+		}
+		return nil, "", context.DeadlineExceeded
+	}
+	if s.afterFault != nil {
+		s.afterFault(ctx)
+	}
+	return s.Store.Load(ctx, n)
+}
+
+func (s *planRetryFaultStore) CompareAndSwap(ctx context.Context, n int, rev string, data []byte) (string, error) {
+	s.writes.Add(1)
+	if s.loseBeforeWrite.Swap(false) {
+		return "", coordination.ErrPublicationUnknown
+	}
+	next, err := s.Store.CompareAndSwap(ctx, n, rev, data)
+	if err == nil && s.loseWrite.Swap(false) {
+		if s.afterWrite != nil {
+			s.afterWrite()
+		}
+		return "", coordination.ErrPublicationUnknown
+	}
+	return next, err
+}
+
+func TestPlanRetrySettlement(t *testing.T) {
+	for _, name := range []string{
+		"deadline_before_write", "interrupted_at_deadline", "deadline_after_write", "deadline_after_write_failure",
+		"unconfirmed_then_recover", "unconfirmed_failure_then_recover", "published_then_recover", "interrupted_replay",
+		"ordinary_plan_with_pending_outcome", "stale_outcome_allows_ordinary_plan/reclaim",
+		"stale_outcome_allows_ordinary_plan/supersede", "save_failure",
+	} {
+		t.Run(name, func(t *testing.T) {
+			root, e, tr := setupProjectPlanTestRepo(t)
+			stateDir := t.TempDir()
+			t.Setenv("XDG_STATE_HOME", stateDir)
+			ctx := t.Context()
+			remote := t.TempDir()
+			completionGit(t, remote, "init", "--bare", "-b", "main")
+			completionGit(t, root, "remote", "add", "origin", remote)
+			completionGit(t, root, "push", "origin", "HEAD:refs/heads/main")
+			store := &planRetryFaultStore{Store: coordination.NewGitStore(root)}
+			e.LeaseManager.SetStore(root, store)
+			wu := &contract.WorkUnit{Objective: "Preserve revised plans", Constraints: []string{"Keep fencing"}, Acceptance: []string{"Keep retry"}, Workflow: "feature", Gate: contract.GateAgent}
+			issue, err := tr.CreateIssue(ctx, "Retry", contract.FormatIssueMarkdown(wu), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			n := issue.Number
+			if _, err = e.LeaseManager.ApproveTask(ctx, n, "maintainer"); err != nil {
+				t.Fatal(err)
+			}
+			independent := coordination.NewGitStoreWithRemote(root, "origin")
+			load := func() (*lease.IssueState, string) {
+				t.Helper()
+				raw, rev, err := independent.Load(ctx, n)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var st lease.IssueState
+				if err := json.Unmarshal(raw, &st); err != nil {
+					t.Fatal(err)
+				}
+				return &st, rev
+			}
+			active := filepath.Join(workspace.WorktreePath(root, n), ".swarm", "active")
+			revised := [2]string{"Revised plan\n", "Revised tests\n"}
+			planFiles := [2]string{filepath.Join(active, "PLAN.md"), filepath.Join(active, "TEST_PLAN.md")}
+			readFiles := func() [2]string {
+				t.Helper()
+				var files [2]string
+				for i, file := range planFiles {
+					data, err := os.ReadFile(file)
+					if err != nil {
+						t.Fatal(err)
+					}
+					files[i] = string(data)
+				}
+				return files
+			}
+			assertReport := func(st *lease.IssueState, index int, body string, version int) {
+				t.Helper()
+				kind := [2]contract.ArtifactType{contract.ArtifactDesign, contract.ArtifactTestPlan}[index]
+				for _, a := range st.Artifacts {
+					if a.Type == kind && a.Body == body && a.Version == version {
+						return
+					}
+				}
+				t.Fatalf("missing %s version %d with expected bytes", kind, version)
+			}
+			retry, plannerCalls := false, 0
+			writeBaseline := int32(0)
+			var pending *lease.IssueState
+			var plannerErr error
+			if strings.Contains(name, "failure") && name != "save_failure" {
+				plannerErr = &providerFixtureError{"capacity"}
+			}
+			var telemetryID string
+			assertInspection := func(operation context.Context) {
+				t.Helper()
+				deadline, configured := operation.Deadline()
+				if !configured || operation.Err() != nil || time.Until(deadline) <= 0 || time.Until(deadline) > 5*time.Second {
+					t.Fatalf("expected fresh bounded settlement context, got %v %v", deadline, operation.Err())
+				}
+			}
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					if req.Role == "planner" {
+						plannerCalls++
+					}
+					if retry {
+						if plannerCalls > 2 {
+							pending, _ = load()
+							if readFiles() != revised {
+								t.Fatal("stale guard overwrote retained plan files")
+							}
+							return nil, errors.New("new admission observed")
+						}
+						pending, _ = load()
+						for i, file := range planFiles {
+							if err := os.WriteFile(file, []byte(revised[i]), 0600); err != nil {
+								t.Fatal(err)
+							}
+						}
+						writeBaseline = store.writes.Load()
+						switch name {
+						case "deadline_before_write", "interrupted_at_deadline":
+							store.waitForDeadline.Store(name == "interrupted_at_deadline")
+							store.beforeFault = func() {
+								st, _ := load()
+								if lease.HasRevisedPlan(st) || readFiles() != revised {
+									t.Fatal("fault must occur after local output and before publication")
+								}
+								store.afterFault = func(ctx context.Context) {
+									assertInspection(ctx)
+									store.afterFault = nil
+								}
+							}
+							store.failLoads.Store(1)
+						case "deadline_after_write", "deadline_after_write_failure", "published_then_recover":
+							store.loseWrite.Store(true)
+							store.afterWrite = func() {
+								if name == "published_then_recover" {
+									store.failLoads.Store(1)
+									return
+								}
+								st, rev := load()
+								st.Lease.ExpiresAt = st.Lease.ExpiresAt.Add(time.Minute)
+								raw, err := json.Marshal(st)
+								if err != nil {
+									t.Fatal(err)
+								}
+								if _, err := independent.CompareAndSwap(t.Context(), n, rev, raw); err != nil {
+									t.Fatal(err)
+								}
+								store.afterFault = func(ctx context.Context) {
+									assertInspection(ctx)
+									store.afterFault = nil
+								}
+							}
+						case "interrupted_replay":
+							store.failLoads.Store(1)
+							store.loseBeforeWrite.Store(true)
+						case "save_failure":
+							t.Setenv("XDG_STATE_HOME", req.WorktreePath)
+						default:
+							store.failLoads.Store(2)
+						}
+						run := &agent.RunResult{Output: "completed"}
+						if plannerErr != nil {
+							run.Telemetry = contract.NewRoleRunTelemetry("planner", "mock", time.Now())
+							run.Telemetry.FailureClass = "capacity"
+							telemetryID = run.Telemetry.RunID
+						}
+						return run, plannerErr
+					}
+					result, err := (&agent.MockRunner{}).Run(ctx, req)
+					if err == nil && req.Role == "reviewer" {
+						result.Output = structuredReviewFixture("CHANGES_REQUESTED")
+						err = os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/REVIEW.md"), []byte(result.Output), 0600)
+					}
+					return result, err
+				}}, nil
+			}
+			opts := WorkOptions{RepoRoot: root, IssueNumber: n, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true}
+			first, err := e.ExecuteWork(ctx, opts)
+			if !errors.Is(err, ErrPlanReviewRejected) {
+				t.Fatalf("initial rejection: %v", err)
+			}
+			retry = true
+			e.Tracker = upstreamWorkflowTracker{tr}
+			e.inspectAgent = func(name string, _ *contract.SwarmConfig, _ bool, _ string, _ agent.RunnerOptions, _ string) (string, sandbox.ToolCapabilityReport, error) {
+				return name, sandbox.ToolCapabilityReport{}, nil
+			}
+			opts.ClaimID, opts.Phase = first.State.Lease.ClaimID, "plan"
+			result, retryErr := e.ExecuteWork(ctx, opts)
+			t.Setenv("XDG_STATE_HOME", stateDir)
+			state, rev := load()
+			if pending == nil || pending.PlanRetryReservation == nil {
+				t.Fatalf("retry never reached the planner: %v", retryErr)
+			}
+			id := pending.PlanRetryReservation.ID
+			wantCount := first.State.PlanReplanCount + 1
+			if state.PlanReplanCount != wantCount || readFiles() != revised {
+				t.Fatalf("retry did not preserve attempt count and local bytes: %v", retryErr)
+			}
+			wantRecovery := name != "deadline_before_write" && name != "interrupted_at_deadline" && name != "deadline_after_write" && name != "deadline_after_write_failure" && name != "save_failure"
+			checkOutcome := func(st *lease.IssueState, runErr error) {
+				t.Helper()
+				if plannerErr == nil {
+					if st.PlanReplanCount != wantCount || !lease.HasRevisedPlan(st) {
+						t.Fatalf("lost retry outcome: count=%d, retry error=%v", st.PlanReplanCount, runErr)
+					}
+					if runErr != nil {
+						t.Fatal(runErr)
+					}
+					for i, body := range revised {
+						assertReport(st, i, body, 2)
+					}
+					for _, a := range st.Artifacts {
+						if a.Type == contract.ArtifactReview {
+							t.Fatal("recovered reports bypassed review")
+						}
+					}
+				} else {
+					if runErr == nil || st.AttemptDiagnostics["planner"].Kind != "planner-retry-failed" || lease.HasRevisedPlan(st) {
+						t.Fatalf("missing failure diagnostic: %v", runErr)
+					}
+					matches := 0
+					for _, run := range st.RoleRuns {
+						if run.RunID == telemetryID && run.FailureClass == "capacity" {
+							matches++
+						}
+					}
+					if matches != 1 {
+						t.Fatalf("recorded %d failed runs", matches)
+					}
+				}
+				if st.PlanRetryReceipt == nil || st.PlanRetryReceipt.ID != id || st.PlanRetryReservation != nil || plannerCalls != 2 || st.PlanReplanCount != wantCount {
+					t.Fatal("retry was not settled exactly once")
+				}
+			}
+			if !wantRecovery {
+				checkOutcome(state, retryErr)
+				if name == "save_failure" && result.PlanRetryRecoveryWarning == "" {
+					t.Fatal("settled outcome omitted the private record failure")
+				}
+				if delta := store.writes.Load() - writeBaseline; delta != 1 {
+					t.Fatalf("made %d settlement writes", delta)
+				}
+				if plannerErr != nil && !errors.Is(retryErr, plannerErr) {
+					t.Fatalf("planner error lost: %v", retryErr)
+				}
+				return
+			}
+			var recovery *IssueRecoveryError
+			if !errors.As(retryErr, &recovery) || !strings.Contains(recovery.Error(), "--recover-plan-retry "+id) {
+				t.Fatalf("missing recovery command: %v", retryErr)
+			}
+			if plannerErr != nil && !errors.Is(retryErr, plannerErr) {
+				t.Fatalf("planner error lost: %v", retryErr)
+			}
+			if name != "published_then_recover" && (lease.HasRevisedPlan(state) || state.PlanRetryReservation.ID != id) {
+				t.Fatal("unconfirmed attempt changed the previous pair")
+			}
+			fresh, err := NewEngine(root, tr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fresh.Tracker, fresh.NewRunner, fresh.inspectAgent = e.Tracker, e.NewRunner, e.inspectAgent
+			fresh.LeaseManager.SetStore(root, independent)
+			recoverOpts := opts
+			recoverOpts.RecoverPlanRetry = id
+			assertUnchanged := func(originalRev string) {
+				t.Helper()
+				_, afterRev := load()
+				if afterRev != originalRev || readFiles() != revised || plannerCalls != 2 {
+					t.Fatal("recovery check mutated state or retained outputs")
+				}
+			}
+			switch name {
+			case "ordinary_plan_with_pending_outcome":
+				readFault := &planRetryFaultStore{Store: independent}
+				readFault.failLoads.Store(1)
+				fresh.LeaseManager.SetStore(root, readFault)
+				if _, err := fresh.ExecuteWork(ctx, opts); !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("ordinary work continued through a failed state read: %v", err)
+				}
+				assertUnchanged(rev)
+				fresh.LeaseManager.SetStore(root, independent)
+				_, err := fresh.ExecuteWork(ctx, opts)
+				if !errors.As(err, &recovery) || !strings.Contains(err.Error(), "--recover-plan-retry "+id) {
+					t.Fatalf("ordinary plan did not require recovery: %v", err)
+				}
+				assertUnchanged(rev)
+			case "stale_outcome_allows_ordinary_plan/reclaim", "stale_outcome_allows_ordinary_plan/supersede":
+				fresh.LeaseManager.BindClaim(n, opts.ClaimID)
+				if strings.HasSuffix(name, "/reclaim") {
+					now := state.Lease.ExpiresAt.Add(time.Second)
+					fresh.LeaseManager.SetNowFunc(func() time.Time { return now })
+					_, err := fresh.ExecuteWork(ctx, recoverOpts)
+					if !errors.Is(err, lease.ErrClaimFence) {
+						t.Fatalf("expired recovery: %v", err)
+					}
+					assertUnchanged(rev)
+					successor, err := fresh.LeaseManager.Acquire(ctx, n, opts.Owner, "mock", "plan", time.Hour, 1)
+					if err != nil || successor.Lease.ClaimID == opts.ClaimID {
+						t.Fatalf("reclaim: %v", err)
+					}
+					opts.ClaimID, recoverOpts.ClaimID = successor.Lease.ClaimID, successor.Lease.ClaimID
+				} else {
+					// Consume the old reservation without a receipt, then install
+					// a successor identity while keeping one more attempt available.
+					if _, err := fresh.LeaseManager.RefundRetryReservation(ctx, n, opts.Owner, id); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := fresh.LeaseManager.UpdatePhase(ctx, n, opts.Owner, "plan", "active"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				superseded, currentRev := load()
+				_, err := fresh.ExecuteWork(ctx, recoverOpts)
+				if !errors.Is(err, lease.ErrClaimFence) {
+					t.Fatalf("stale recovery: %v", err)
+				}
+				assertUnchanged(currentRev)
+				_, err = fresh.ExecuteWork(ctx, opts)
+				if plannerCalls != 3 || pending.PlanReplanCount != superseded.PlanReplanCount+1 ||
+					pending.PlanRetryReservation == nil || pending.PlanRetryReservation.ID == id || err == nil || !strings.Contains(err.Error(), "new admission observed") {
+					t.Fatalf("ordinary plan did not reach new admission: %v", err)
+				}
+				return
+			case "unconfirmed_then_recover":
+				// A rejected recovery must leave the authoritative revision and
+				// both files alone, so the original claim can follow the selector.
+				wrongOwner := recoverOpts
+				wrongOwner.Owner = "different"
+				if _, err := fresh.ExecuteWork(ctx, wrongOwner); !errors.Is(err, lease.ErrClaimFence) {
+					t.Fatalf("wrong-owner recovery: %v", err)
+				}
+				assertUnchanged(rev)
+				if err := os.WriteFile(planFiles[0], []byte("substituted"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := fresh.ExecuteWork(ctx, recoverOpts); !errors.Is(err, lease.ErrClaimFence) {
+					t.Fatalf("substituted recovery: %v", err)
+				}
+				if err := os.WriteFile(planFiles[0], []byte(revised[0]), 0600); err != nil {
+					t.Fatal(err)
+				}
+				assertUnchanged(rev)
+			}
+			_, recoverErr := fresh.ExecuteWork(ctx, recoverOpts)
+			state, settledRev := load()
+			checkOutcome(state, recoverErr)
+			if name == "published_then_recover" && settledRev != rev {
+				t.Fatal("recovery wrote over an already-published receipt")
+			}
+			if _, err := fresh.ExecuteWork(ctx, recoverOpts); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("retired recovery remained replayable: %v", err)
+			}
+			assertUnchanged(settledRev)
+		})
+	}
+}

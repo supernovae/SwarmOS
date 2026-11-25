@@ -50,6 +50,10 @@ var claimFenceInventory = map[string]string{
 	"Budget":                         "read-only admission, observation or local binding; no durable state write",
 	"BudgetContext":                  "read-only admission, observation or local binding; no durable state write",
 	"CheckClaim":                     "read-only admission, observation or local binding; no durable state write",
+	"InspectPlanRetry":               "read-only checked claim snapshot and CAS revision",
+	"ProjectSettledPlanRetry":        "best-effort tracker projection only",
+	"ValidatePlanRetryPair":          "read-only candidate artifact validation",
+	"SettlePlanRetry":                "",
 	"CheckClaimState":                "read-only checked claim snapshot; never authorizes writes",
 	"CheckImplementationRetry":       "read-only admission, observation or local binding; no durable state write",
 	"CheckPlanReplan":                "read-only admission, observation or local binding; no durable state write",
@@ -234,6 +238,10 @@ func claimFenceWrites() []claimFenceWrite {
 		}},
 		{"InvalidatePRRevisionEvidence", func(ctx context.Context, f *claimFenceFixture) error {
 			_, err := f.m.InvalidatePRRevisionEvidence(ctx, f.n, fenceOwner, 17)
+			return err
+		}},
+		{"SettlePlanRetry", func(ctx context.Context, f *claimFenceFixture) error {
+			_, err := f.m.SettlePlanRetry(ctx, f.n, fenceOwner, "", PlanRetryOutcome{})
 			return err
 		}},
 		{"RecordPlanPair", func(ctx context.Context, f *claimFenceFixture) error {

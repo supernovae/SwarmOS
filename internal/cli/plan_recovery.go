@@ -201,3 +201,53 @@ func planReviewReason(st *lease.IssueState) string {
 	}
 	return ""
 }
+
+func runPlanRetryRecovery(cmd *cobra.Command, root *RootOptions, arg, retryID string, asJSON bool) (runErr error) {
+	n, err := parseNumberArg(arg, "issue")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		runErr = (stopContext{opts: root, resource: "issue", number: n}).stop(runErr)
+		reportJSONFailureWithReport(cmd, asJSON, "work", runErr, nil)
+	}()
+	tr, manager, err := root.resolveCheckpointManager(cmd)
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(tr.BackendName(), "github (") {
+		return fmt.Errorf("--recover-plan-retry requires a GitHub issue")
+	}
+	repo := root.resolveRepoRoot()
+	lock, err := lease.LockClaim(repo, n)
+	if err != nil {
+		return err
+	}
+	defer lease.UnlockClaim(lock)
+	token, err := lease.LoadClaimToken(repo, n)
+	if errors.Is(err, os.ErrNotExist) {
+		return lease.ErrClaimFence
+	}
+	if err != nil {
+		return err
+	}
+	engine := workflow.NewEngineWithManagerOptions(repo, tr, manager, nil, false, "", root.engineOptions())
+	result, err := engine.ExecuteWork(cmd.Context(), workflow.WorkOptions{
+		IssueNumber: n, RepoRoot: repo, ClaimID: token, Phase: "plan", RecoverPlanRetry: retryID,
+	})
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		return writeJSON(cmd, map[string]any{"kind": "plan-retry-recovery", "status": result.Outcome(), "result": result})
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Issue #%d planner retry settled.\n", n)
+	if result.WorkUnitCorrectionRequired {
+		fmt.Fprintln(cmd.OutOrStdout(), workUnitCorrectionGuidance(root, result, n))
+	} else if result.SplitRecommended {
+		fmt.Fprintln(cmd.OutOrStdout(), splitGuidance(root, result, n))
+	} else if result.State.EffectiveGate != contract.GateNone {
+		fmt.Fprintln(cmd.OutOrStdout(), planReviewRecovery(root, result.State, "issue", n))
+	}
+	return nil
+}

@@ -3,14 +3,21 @@ package agent
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/supernovae/swarmos/internal/filelock"
+	"github.com/supernovae/swarmos/internal/safefs"
+	"github.com/supernovae/swarmos/internal/sandbox"
 )
 
 // Rejected-run recovery patches share the diagnostics storage rules: a private
@@ -176,4 +183,100 @@ func parseRecoveryPatch(data []byte) (RecoveryHeader, []byte, error) {
 		return invalid()
 	}
 	return h, text, nil
+}
+
+const planRetryRecordLimit = 16 << 20 // two bounded plan files, JSON escaping, and metadata
+
+var planRetryID = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+func openPlanRetryDir(worktree, repository string, issue int, create bool) (*safefs.Root, error) {
+	if repository == "" || issue <= 0 {
+		return nil, fmt.Errorf("invalid planner retry record scope")
+	}
+	name := fmt.Sprintf("plan-retries/%x/%d", sha256.Sum256([]byte(repository)), issue)
+	var excluded []string
+	if cache, err := os.UserCacheDir(); err == nil {
+		excluded = append(excluded, filepath.Join(cache, "swarm", string(sandbox.AgentBuildCache)))
+	}
+	_, dir, err := openPrivateStateDir(worktree, name, create, excluded...)
+	return dir, err
+}
+
+// SavePlanRetryRecovery saves coordinator evidence outside the planner checkout.
+func SavePlanRetryRecovery(worktree, repository string, issue int, id string, data []byte) error {
+	if !planRetryID.MatchString(id) || len(data) > planRetryRecordLimit || !json.Valid(data) {
+		return fmt.Errorf("invalid planner retry record")
+	}
+	dir, err := openPlanRetryDir(worktree, repository, issue, true)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	if err := dir.WriteFileDurable(id, data, 0600); err != nil {
+		return unavailableWrite
+	}
+	return nil
+}
+
+func LoadPlanRetryRecovery(worktree, repository string, issue int, id string) ([]byte, error) {
+	if !planRetryID.MatchString(id) {
+		return nil, fmt.Errorf("invalid planner retry ID")
+	}
+	dir, err := openPlanRetryDir(worktree, repository, issue, false)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("missing private planner retry evidence: %w", os.ErrNotExist)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	data, err := dir.ReadFile(id, planRetryRecordLimit)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("missing private planner retry evidence: %w", os.ErrNotExist)
+	}
+	if err != nil || !json.Valid(data) {
+		return nil, fmt.Errorf("invalid or unreadable private planner retry evidence")
+	}
+	return data, nil
+}
+
+// HasPlanRetryRecovery reports whether there may be local evidence to match
+// against authoritative state. Only the authoritative retry IDs are loaded.
+func HasPlanRetryRecovery(worktree, repository string, issue int) (bool, error) {
+	dir, err := openPlanRetryDir(worktree, repository, issue, false)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer dir.Close()
+	f, err := dir.OpenDirectory(".")
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	names, err := f.Readdirnames(1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+	return len(names) != 0, nil
+}
+
+func RemovePlanRetryRecovery(worktree, repository string, issue int, id string) error {
+	if !planRetryID.MatchString(id) {
+		return fmt.Errorf("invalid planner retry ID")
+	}
+	dir, err := openPlanRetryDir(worktree, repository, issue, false)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	if err := dir.Remove(id); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("could not retire private planner retry evidence")
+	}
+	return nil
 }

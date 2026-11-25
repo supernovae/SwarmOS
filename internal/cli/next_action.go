@@ -24,6 +24,7 @@ const (
 	ReasonPartialImplementation   = "partial_implementation"
 	ReasonChangesRequested        = "changes_requested"
 	ReasonPlanNoProgress          = "plan_no_progress"
+	ReasonPlanRetryRecovery       = "plan_retry_recovery"
 	ReasonNeedsApproval           = "needs_approval"
 	ReasonConflict                = "conflict"
 	// ReasonPreExistingFailures stops a run whose failing tests all fail at
@@ -155,7 +156,9 @@ func (c stopContext) classify(err error) *NextAction {
 	var recovery *workflow.IssueRecoveryError
 	if errors.As(err, &recovery) {
 		reason := ReasonChangesRequested
-		if recovery.Human {
+		if errors.Is(err, workflow.ErrPlanRetryRecovery) {
+			reason = ReasonPlanRetryRecovery
+		} else if recovery.Human {
 			reason = ReasonNeedsApproval
 		}
 		if errors.Is(err, workflow.ErrPreExistingFailures) {

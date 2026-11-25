@@ -1205,3 +1205,88 @@ func TestReapproveRebaseActiveClaimGuidance(t *testing.T) {
 		t.Fatal("refusal changed state")
 	}
 }
+
+func TestPlanRetrySettlementLease(t *testing.T) {
+	for _, scenario := range []string{"receipt", "missing_reservation", "mismatch", "refund", "changed_rejection", "changed_policy", "changed_task"} {
+		t.Run(scenario, func(t *testing.T) {
+			m, n, _ := rejectedReplanFixture(t)
+			ctx := t.Context()
+			const owner = "local-dev"
+			st, err := m.UpdatePhase(ctx, n, owner, "plan", "active")
+			if err != nil {
+				t.Fatal(err)
+			}
+			outcome := PlanRetryOutcome{
+				Reservation: *st.PlanRetryReservation, Owner: owner,
+				Plan: contract.Artifact{Type: contract.ArtifactDesign, Producer: "mock:planner", Summary: "plan", Body: "revised plan"},
+				Test: contract.Artifact{Type: contract.ArtifactTestPlan, Producer: "mock:planner", Summary: "test plan", Body: "revised tests"},
+			}
+			if scenario == "refund" {
+				outcome.Plan, outcome.Test = contract.Artifact{}, contract.Artifact{}
+				outcome.Failure, outcome.Refund = "failed", true
+			}
+			if scenario == "missing_reservation" {
+				if _, err := m.CompleteRetryReservation(ctx, n, owner, outcome.Reservation.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if strings.HasPrefix(scenario, "changed_") {
+				if _, err := m.mutate(ctx, n, owner, func(st *IssueState) error {
+					switch scenario {
+					case "changed_rejection":
+						st.PendingPlanReview.Version++
+					case "changed_policy":
+						st.PolicyDigest = "different"
+					case "changed_task":
+						st.TaskDigest = "different"
+					}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, rev, err := m.Store().Load(ctx, n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			settled, err := m.SettlePlanRetry(ctx, n, owner, rev, outcome)
+			if scenario == "missing_reservation" || strings.HasPrefix(scenario, "changed_") {
+				if !errors.Is(err, ErrClaimFence) {
+					t.Fatalf("expected fence error: %v", err)
+				}
+				if _, after, err := m.Store().Load(ctx, n); err != nil || after != rev {
+					t.Fatalf("fenced settlement changed revision: %s %v", after, err)
+				}
+				return
+			}
+			if err != nil || settled.PlanRetryReceipt == nil || settled.PlanRetryReservation != nil {
+				t.Fatalf("settlement: %v", err)
+			}
+			_, written, err := m.Store().Load(ctx, n)
+			if err != nil || written == rev {
+				t.Fatalf("receipt was not written: %v", err)
+			}
+			if scenario == "mismatch" {
+				outcome.Test.Body = "different outcome"
+			}
+			again, err := m.SettlePlanRetry(ctx, n, owner, written, outcome)
+			switch scenario {
+			case "mismatch":
+				if !errors.Is(err, ErrClaimFence) {
+					t.Fatalf("receipt matched different content: %v", err)
+				}
+			case "refund":
+				if err != nil || again.PlanReplanCount != st.PlanReplanCount-1 || again.AttemptDiagnostics["planner"].Kind != "planner-retry-failed" {
+					t.Fatalf("refund did not settle once: %v", err)
+				}
+			default:
+				if err != nil || !HasRevisedPlan(again) || again.PlanReplanCount != st.PlanReplanCount {
+					t.Fatalf("receipt did not confirm the settled pair: %v", err)
+				}
+			}
+			if _, rev, err := m.Store().Load(ctx, n); err != nil || rev != written {
+				t.Fatalf("settlement replay changed revision: %s %v", rev, err)
+			}
+		})
+	}
+}

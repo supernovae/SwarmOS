@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/harness"
 )
 
@@ -143,6 +144,7 @@ func (m *Manager) reservePlanReplanContext(ctx context.Context, st *IssueState) 
 	// A new planner admission retires any older unfinished identity, including
 	// when a human decision changed which allowance applies.
 	st.PlanRetryReservation = nil
+	st.PlanRetryReceipt = nil
 	if directIssue(st) && !strings.EqualFold(cfg.PlanMode, "interactive") {
 		p := st.PendingPlanReview
 		if st.HumanPlanReview != nil {
@@ -384,78 +386,99 @@ func (m *Manager) RecordPlanPair(ctx context.Context, n int, owner string, plan,
 		return nil, fmt.Errorf("plan pair requires direct coordinator")
 	}
 	st, err := m.mutate(ctx, n, owner, func(st *IssueState) error {
-		if !directIssue(st) {
-			return fmt.Errorf("plan pair requires direct issue")
-		}
-		if plan.Type != contract.ArtifactDesign || test.Type != contract.ArtifactTestPlan {
-			return fmt.Errorf("expected design and test-plan pair")
-		}
-		oldPlan, oldTest := planReports(st)
-		rejection := st.PendingPlanReview
-		if st.HumanPlanReview != nil {
-			rejection = st.HumanPlanReview
-		}
-		if rejection != nil {
-			if !validRejection(rejection) || rejection.TaskDigest != st.TaskDigest || !planReservationMatches(st, rejection) {
-				return ErrPlanApprovalRequired
-			}
-			if oldPlan != nil && oldTest != nil && contract.CanonicalArtifactBody(oldPlan.Body) == contract.CanonicalArtifactBody(plan.Body) && contract.CanonicalArtifactBody(oldTest.Body) == contract.CanonicalArtifactBody(test.Body) {
-				return ErrPlanUnchanged
-			}
-			if hash(contract.CanonicalArtifactBody(plan.Body)) == rejection.PlanDigest && hash(contract.CanonicalArtifactBody(test.Body)) == rejection.TestDigest {
-				return ErrPlanUnchanged
-			}
-			if st.HumanPlanReview != nil && st.HumanDraftCount == 0 || st.HumanPlanReview == nil && st.PlanReplanCount == 0 {
-				return ErrPlanApprovalRequired
-			}
-		}
-		pair := []contract.Artifact{plan, test}
-		for i := range pair {
-			a := &pair[i]
-			if strings.TrimSpace(a.Body) == "" {
-				return fmt.Errorf("empty plan report")
-			}
-			a.IssueNumber = n
-			a.ID = fmt.Sprintf("art-%d-%s", n, a.Type)
-			a.Version = 1
-			a.CreatedAt = m.nowFn()
-			if a.Type == contract.ArtifactDesign && oldPlan != nil {
-				a.Version = oldPlan.Version + 1
-			}
-			if a.Type == contract.ArtifactTestPlan && oldTest != nil {
-				a.Version = oldTest.Version + 1
-			}
-			meta := map[string]string{}
-			for k, v := range a.Metadata {
-				if !strings.HasPrefix(k, "checkpoint_plan_") {
-					meta[k] = v
-				}
-			}
-			a.Metadata = meta
-			recordRoleRun(st, a)
-			a.Metadata["content_sha256"] = hash(a.Body)
-			if err := contract.ValidateArtifact(a); err != nil {
-				return err
-			}
-			RecordRoleAttestation(st, contract.RoleAttestation{Role: "planner", Agent: meta["agent"], Harness: meta["harness"], HarnessVersion: meta["harness_version"], Model: meta["model"], ExecutionMode: meta["execution_mode"], Authentication: meta["authentication"], Sandbox: meta["sandbox"], ArtifactType: string(a.Type), ArtifactDigest: hash(a.Body)})
-		}
-		kept := make([]contract.Artifact, 0, len(st.Artifacts)+2)
-		for _, a := range st.Artifacts {
-			if a.Type != contract.ArtifactDesign && a.Type != contract.ArtifactTestPlan && a.Type != contract.ArtifactReview {
-				kept = append(kept, a)
-			}
-		}
-		delete(st.AttemptDiagnostics, "planner")
-		st.Artifacts = append(kept, pair...)
-		markPlanPair(st)
-		st.PlanRetryReservation = nil
-		st.PlanReservation = nil
-		return nil
+		return m.applyPlanPair(st, n, plan, test)
 	})
-	if err == nil && m.tracker != nil && (st.EffectiveGate != contract.GateNone || st.HumanPlanReview != nil) {
-		_ = m.tracker.AddLabels(ctx, n, []string{"swarm:plan-review"})
+	if err == nil {
+		m.projectPlanPair(ctx, n, st)
 	}
 	return st, err
+}
+
+func (m *Manager) preparePlanPair(st *IssueState, n int, plan, test contract.Artifact) ([]contract.Artifact, error) {
+	if !directIssue(st) {
+		return nil, fmt.Errorf("plan pair requires direct issue")
+	}
+	if plan.Type != contract.ArtifactDesign || test.Type != contract.ArtifactTestPlan {
+		return nil, fmt.Errorf("expected design and test-plan pair")
+	}
+	oldPlan, oldTest := planReports(st)
+	rejection := st.PendingPlanReview
+	if st.HumanPlanReview != nil {
+		rejection = st.HumanPlanReview
+	}
+	if rejection != nil {
+		if !validRejection(rejection) || rejection.TaskDigest != st.TaskDigest || !planReservationMatches(st, rejection) {
+			return nil, ErrPlanApprovalRequired
+		}
+		if oldPlan != nil && oldTest != nil && contract.CanonicalArtifactBody(oldPlan.Body) == contract.CanonicalArtifactBody(plan.Body) && contract.CanonicalArtifactBody(oldTest.Body) == contract.CanonicalArtifactBody(test.Body) {
+			return nil, ErrPlanUnchanged
+		}
+		if hash(contract.CanonicalArtifactBody(plan.Body)) == rejection.PlanDigest && hash(contract.CanonicalArtifactBody(test.Body)) == rejection.TestDigest {
+			return nil, ErrPlanUnchanged
+		}
+		if st.HumanPlanReview != nil && st.HumanDraftCount == 0 || st.HumanPlanReview == nil && st.PlanReplanCount == 0 {
+			return nil, ErrPlanApprovalRequired
+		}
+	}
+	pair := []contract.Artifact{plan, test}
+	for i := range pair {
+		a := &pair[i]
+		if strings.TrimSpace(a.Body) == "" {
+			return nil, fmt.Errorf("empty plan report")
+		}
+		a.IssueNumber = n
+		a.ID = fmt.Sprintf("art-%d-%s", n, a.Type)
+		a.Version = 1
+		a.CreatedAt = m.nowFn()
+		if a.Type == contract.ArtifactDesign && oldPlan != nil {
+			a.Version = oldPlan.Version + 1
+		}
+		if a.Type == contract.ArtifactTestPlan && oldTest != nil {
+			a.Version = oldTest.Version + 1
+		}
+		meta := map[string]string{}
+		for k, v := range a.Metadata {
+			if !strings.HasPrefix(k, "checkpoint_plan_") {
+				meta[k] = v
+			}
+		}
+		a.Metadata = meta
+		a.Metadata["content_sha256"] = hash(a.Body)
+		if err := contract.ValidateArtifact(a); err != nil {
+			return nil, err
+		}
+	}
+	return pair, nil
+}
+
+func (m *Manager) ValidatePlanRetryPair(st *IssueState, n int, plan, test contract.Artifact) error {
+	_, err := m.preparePlanPair(st, n, plan, test)
+	return err
+}
+
+func (m *Manager) applyPlanPair(st *IssueState, n int, plan, test contract.Artifact) error {
+	pair, err := m.preparePlanPair(st, n, plan, test)
+	if err != nil {
+		return err
+	}
+	for i := range pair {
+		a := &pair[i]
+		recordRoleRun(st, a)
+		meta := a.Metadata
+		RecordRoleAttestation(st, contract.RoleAttestation{Role: "planner", Agent: meta["agent"], Harness: meta["harness"], HarnessVersion: meta["harness_version"], Model: meta["model"], ExecutionMode: meta["execution_mode"], Authentication: meta["authentication"], Sandbox: meta["sandbox"], ArtifactType: string(a.Type), ArtifactDigest: hash(a.Body)})
+	}
+	kept := make([]contract.Artifact, 0, len(st.Artifacts)+2)
+	for _, a := range st.Artifacts {
+		if a.Type != contract.ArtifactDesign && a.Type != contract.ArtifactTestPlan && a.Type != contract.ArtifactReview {
+			kept = append(kept, a)
+		}
+	}
+	delete(st.AttemptDiagnostics, "planner")
+	st.Artifacts = append(kept, pair...)
+	markPlanPair(st)
+	st.PlanRetryReservation = nil
+	st.PlanReservation = nil
+	return nil
 }
 
 // HasRevisedPlan distinguishes completion from a replacement of rejected bytes.
@@ -572,4 +595,166 @@ func (m *Manager) finishRetryReservation(ctx context.Context, n int, owner, id s
 		}
 		return nil
 	})
+}
+
+// PlanRetryOutcome is the coordinator-prepared result of one planner retry.
+// Failure is a fixed diagnostic code. FileDigests bind the retained reports.
+type PlanRetryOutcome struct {
+	Reservation RetryReservation
+	Owner       string
+	Plan, Test  contract.Artifact
+	FileDigests [2]string
+	Failure     string
+	Telemetry   string
+	Refund      bool
+}
+
+// PlanRetryReceipt authenticates an exact outcome after admission is consumed.
+type PlanRetryReceipt struct {
+	ID      string `json:"id"`
+	ClaimID string `json:"claim_id"`
+	Owner   string `json:"owner"`
+	Outcome string `json:"outcome"`
+	Binding string `json:"binding"`
+}
+
+func (o PlanRetryOutcome) Digest() (string, error) {
+	payload, err := json.Marshal(o)
+	return hash(string(payload)), err
+}
+
+func planRetryReceiptBinding(st *IssueState) string {
+	copy := *st
+	copy.Artifacts = nil
+	for _, a := range st.Artifacts {
+		switch a.Type {
+		case contract.ArtifactDesign, contract.ArtifactTestPlan, contract.ArtifactReview:
+			copy.Artifacts = append(copy.Artifacts, a)
+		}
+	}
+	return retryBinding(&copy)
+}
+
+// MatchPlanRetryOutcome classifies a state already checked under the claim
+// fence. The pending and settled forms bind different plan artifact versions.
+func MatchPlanRetryOutcome(st *IssueState, owner string, o PlanRetryOutcome) (settled bool, err error) {
+	r := o.Reservation
+	if !directIssue(st) || r.ID == "" || r.ClaimID != st.Lease.ClaimID || owner != st.Lease.Owner || o.Owner != owner {
+		return false, ErrClaimFence
+	}
+	if receipt := st.PlanRetryReceipt; receipt != nil && receipt.ID == r.ID {
+		digest, err := o.Digest()
+		if err != nil {
+			return false, err
+		}
+		if *receipt != (PlanRetryReceipt{r.ID, r.ClaimID, owner, digest, planRetryReceiptBinding(st)}) {
+			return false, ErrClaimFence
+		}
+		return true, nil
+	}
+	if st.PlanRetryReservation == nil || *st.PlanRetryReservation != r || r.Binding != retryBinding(st) ||
+		st.PlanReplanCount <= 0 || st.HumanPlanReview != nil || !planReservationMatches(st, st.PendingPlanReview) {
+		return false, ErrClaimFence
+	}
+	return false, nil
+}
+
+// InspectPlanRetry returns a fenced authoritative snapshot and its CAS revision.
+func (m *Manager) InspectPlanRetry(ctx context.Context, n int, owner string) (*IssueState, string, error) {
+	if m.gateway != nil {
+		return nil, "", ErrClaimFence
+	}
+	st, rev, err := m.load(ctx, n)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := m.checkStateClaim(ctx, n, owner, st); err != nil {
+		var approval *TaskApprovalError
+		if errors.As(err, &approval) {
+			err = errors.Join(ErrClaimFence, err)
+		}
+		return nil, "", err
+	}
+	return st, rev, nil
+}
+
+// SettlePlanRetry commits the result and receipt in one fenced CAS. An explicit
+// predecessor pins replay to the revision classified by the caller.
+func (m *Manager) SettlePlanRetry(ctx context.Context, n int, owner, predecessor string, o PlanRetryOutcome) (*IssueState, error) {
+	st, rev, err := m.InspectPlanRetry(ctx, n, owner)
+	if err != nil {
+		return nil, err
+	}
+	if predecessor != "" && predecessor != rev {
+		return nil, coordination.ErrConflict
+	}
+	settled, err := MatchPlanRetryOutcome(st, owner, o)
+	if err != nil || settled {
+		return st, err
+	}
+	digest, err := o.Digest()
+	if err != nil {
+		return nil, err
+	}
+	if o.Failure == "" {
+		if o.Refund {
+			return nil, fmt.Errorf("cannot refund a completed planner retry")
+		}
+		if err := m.applyPlanPair(st, n, o.Plan, o.Test); err != nil {
+			return nil, err
+		}
+	} else {
+		switch o.Failure {
+		case "failed", "invalid-output", "unchanged", "timeout":
+		default:
+			return nil, fmt.Errorf("invalid planner retry diagnostic")
+		}
+		if o.Refund && o.Failure != "failed" && o.Failure != "timeout" {
+			return nil, fmt.Errorf("invalid planner retry refund")
+		}
+		if o.Telemetry != "" {
+			run, err := contract.ParseRoleRunTelemetry(o.Telemetry)
+			if err != nil || run.Role != "planner" || run.FailureClass == "" {
+				return nil, fmt.Errorf("invalid failed planner telemetry")
+			}
+			appendRoleRun(st, run)
+		}
+		if st.AttemptDiagnostics == nil {
+			st.AttemptDiagnostics = map[string]AttemptDiagnostic{}
+		}
+		kind := "planner-retry-" + o.Failure
+		if o.Failure == "timeout" {
+			kind = "timeout"
+		}
+		st.AttemptDiagnostics["planner"] = AttemptDiagnostic{TaskDigest: st.TaskDigest, ClaimID: st.Lease.ClaimID, Kind: kind}
+		if o.Refund {
+			st.PlanReplanCount--
+		}
+		st.PlanReservation = nil
+		st.PlanRetryReservation = nil
+	}
+	st.PlanRetryReceipt = &PlanRetryReceipt{o.Reservation.ID, o.Reservation.ClaimID, owner, digest, planRetryReceiptBinding(st)}
+	if err := m.checkClaimFence(n, owner, st); err != nil {
+		return nil, err
+	}
+	st, err = m.save(ctx, n, rev, st)
+	if err == nil && o.Failure == "" {
+		m.projectPlanPair(ctx, n, st)
+	}
+	return st, err
+}
+
+// ProjectSettledPlanRetry refreshes advisory tracker output after the
+// authoritative receipt resolves an ambiguous write.
+func (m *Manager) ProjectSettledPlanRetry(ctx context.Context, n int, st *IssueState, planRecorded bool) {
+	m.projectWithIssue(ctx, n, st, nil)
+	if planRecorded {
+		m.projectPlanPair(ctx, n, st)
+	}
+}
+
+func (m *Manager) projectPlanPair(ctx context.Context, n int, st *IssueState) {
+	if m.tracker != nil && (st.EffectiveGate != contract.GateNone || st.HumanPlanReview != nil) {
+		_ = m.tracker.AddLabels(ctx, n, []string{"swarm:plan-review"})
+	}
 }

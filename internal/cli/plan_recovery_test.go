@@ -3,6 +3,9 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
@@ -15,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/lease"
 )
@@ -165,5 +169,148 @@ func TestCheckpointRecoveryPlanCLIInputs(t *testing.T) {
 				t.Fatal("preview/refusal invoked runner")
 			}
 		})
+	}
+}
+
+func TestPlanRetryRecoveryCLI(t *testing.T) {
+	id := strings.Repeat("a", 64)
+	for _, tc := range []struct {
+		flags []string
+		fork  bool
+	}{
+		{flags: []string{"1"}},
+		{flags: []string{"1", "--phase", "plan", "--dry-run"}},
+		{flags: []string{"1", "--phase", "plan", "--handoff"}},
+		{flags: []string{"1", "--phase", "plan", "--plan-checkpoint"}},
+		{flags: []string{"1", "--phase", "plan", "--candidate-head", "head"}},
+		{flags: []string{"--next", "--phase", "plan"}},
+		{flags: []string{"--next", "--all", "--phase", "plan"}},
+		{flags: []string{"1", "--phase", "plan"}, fork: true},
+	} {
+		cmd := newWorkCmd(&RootOptions{Fork: tc.fork})
+		cmd.SetArgs(append(tc.flags, "--recover-plan-retry", id))
+		var output bytes.Buffer
+		cmd.SetOut(&output)
+		cmd.SetErr(&output)
+		if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "--recover-plan-retry requires") {
+			t.Fatalf("accepted conflicting selector %v: %v", tc.flags, err)
+		}
+	}
+
+	f := newCLIFixture(t)
+	stateDir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateDir)
+	n := f.create(t, "agent")
+	ctx := t.Context()
+	issue, err := f.tracker.GetIssue(ctx, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, tr := newFakeGitHubTracker(t, issue)
+	addTestOrigin(t, f)
+	m := lease.NewManager(tr, contract.SecurityConfig{})
+	if err := m.ConfigureStore(f.root); err != nil {
+		t.Fatal(err)
+	}
+	const owner = "alice"
+	if _, err := m.ApproveTask(ctx, n, owner); err != nil {
+		t.Fatal(err)
+	}
+	st, err := m.Acquire(ctx, n, owner, "mock", "plan", time.Hour, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.SaveClaimToken(f.root, n, st.Lease.ClaimID, st.BaseSHA); err != nil {
+		t.Fatal(err)
+	}
+	path, _, err := workspace.ProvisionAt(f.root, n, issue.Title, st.BaseSHA, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := contract.Artifact{Type: contract.ArtifactDesign, Producer: "mock:planner", Summary: "plan", Body: "initial plan"}
+	test := contract.Artifact{Type: contract.ArtifactTestPlan, Producer: "mock:planner", Summary: "test plan", Body: "initial tests"}
+	st, err = m.RecordPlanPair(ctx, n, owner, plan, test)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := lease.ReviewBindings(st)
+	meta["kind"] = "agent"
+	_, err = m.UpdateArtifact(ctx, n, owner, contract.Artifact{
+		Type: contract.ArtifactReview, Producer: "mock:reviewer", Summary: "review", Verdict: "CHANGES_REQUESTED",
+		Body: "VERDICT: CHANGES_REQUESTED\n\nRevise the plan", Metadata: meta,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err = m.UpdatePhase(ctx, n, owner, "plan", "active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Body, test.Body = "revised plan", "revised tests"
+	outcome := lease.PlanRetryOutcome{Reservation: *st.PlanRetryReservation, Owner: owner, Plan: plan, Test: test}
+	active := filepath.Join(path, ".swarm", "active")
+	if err := os.MkdirAll(active, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for i, file := range []string{"PLAN.md", "TEST_PLAN.md"} {
+		body := []byte([]string{plan.Body, test.Body}[i])
+		if err := os.WriteFile(filepath.Join(active, file), body, 0600); err != nil {
+			t.Fatal(err)
+		}
+		outcome.FileDigests[i] = fmt.Sprintf("%x", sha256.Sum256(body))
+	}
+	digest, err := outcome.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := filepath.EvalSymlinks(f.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkout := workspace.WorktreePath(canonical, n)
+	data, err := json.Marshal(struct {
+		Checkout, Digest string
+		Outcome          lease.PlanRetryOutcome
+	}{checkout, digest, outcome})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.SavePlanRetryRecovery(checkout, tr.BackendName()+"\n"+canonical, n, outcome.Reservation.ID, data); err != nil {
+		t.Fatal(err)
+	}
+	runnerCalls := 0
+	f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+		runnerCalls++
+		return nil, os.ErrNotExist
+	}
+	run := func(args ...string) (string, error) {
+		t.Helper()
+		cmd := f.command(&RootOptions{RepoRoot: f.root, Repo: "octo/swarm", trackerOverride: tr})
+		var output, diagnostics bytes.Buffer
+		cmd.SetOut(&output)
+		cmd.SetErr(&diagnostics)
+		cmd.SetArgs(args)
+		err := cmd.ExecuteContext(ctx)
+		return output.String(), err
+	}
+	output, err := run("issue", "work", strconv.Itoa(n), "--phase", "plan", "--json", "--headless")
+	var stopped struct {
+		NextAction NextAction `json:"next_action"`
+	}
+	if err == nil || json.Unmarshal([]byte(output), &stopped) != nil ||
+		stopped.NextAction.Reason != ReasonPlanRetryRecovery || len(stopped.NextAction.Argv) == 0 {
+		t.Fatalf("missing JSON recovery action: %v %s", err, output)
+	}
+	rendered := stopped.NextAction.Argv
+	if last := rendered[len(rendered)-1]; last != outcome.Reservation.ID {
+		t.Fatalf("rendered command lost the retry ID: %v", rendered)
+	}
+	output, err = run(append(rendered[1:], "--json")...)
+	if err != nil || !strings.Contains(output, "plan-retry-recovery") || runnerCalls != 0 {
+		t.Fatalf("rendered command did not recover without a planner: %v %s, calls %d", err, output, runnerCalls)
+	}
+	settled, err := m.GetCurrentState(ctx, n)
+	if err != nil || settled.PlanReplanCount != 1 || !lease.HasRevisedPlan(settled) {
+		t.Fatalf("retry outcome missing from upstream: %v", err)
 	}
 }

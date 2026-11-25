@@ -181,6 +181,10 @@ func userStateDir() (string, error) {
 // without following symlinks, and refuses a location that is shared with other
 // users or inside the agent's worktree.
 func openStateDir(worktree, sub string) (string, *safefs.Root, error) {
+	return openPrivateStateDir(worktree, sub, true)
+}
+
+func openPrivateStateDir(worktree, sub string, create bool, excludedRoots ...string) (string, *safefs.Root, error) {
 	state, err := diagnosticsStateDir()
 	if err != nil {
 		return "", nil, unavailableStateDir
@@ -207,15 +211,24 @@ func openStateDir(worktree, sub string) (string, *safefs.Root, error) {
 	}
 	rel := filepath.Join(append(missing, "swarm", sub)...)
 	dirPath := filepath.Join(existing, rel)
-	if resolved, err := filepath.EvalSymlinks(existing); err != nil || insideWorktree(worktree, dirPath) || insideWorktree(worktree, filepath.Join(resolved, rel)) {
+	resolved, err := filepath.EvalSymlinks(existing)
+	if err != nil {
 		return "", nil, unavailableUnsafe
+	}
+	for _, root := range append(excludedRoots, worktree) {
+		if insideWorktree(root, dirPath) || insideWorktree(root, filepath.Join(resolved, rel)) {
+			return "", nil, unavailableUnsafe
+		}
 	}
 	base, err := safefs.Open(existing)
 	if err != nil {
 		return "", nil, unavailablePrivate
 	}
 	defer base.Close()
-	dir, err := base.Sub(rel, true, 0o700)
+	dir, err := base.Sub(rel, create, 0o700)
+	if !create && errors.Is(err, os.ErrNotExist) {
+		return "", nil, os.ErrNotExist
+	}
 	if err != nil {
 		return "", nil, unavailablePrivate
 	}

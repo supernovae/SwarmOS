@@ -348,6 +348,7 @@ type IssueState struct {
 	PlanReservation        *PlanDraftReservation           `json:"plan_reservation,omitempty"`
 	CompletePlan           *PlanPair                       `json:"complete_plan,omitempty"`
 	ValidationRepairCount  int                             `json:"validation_repair_count,omitempty"`
+	PlanRetryReceipt       *PlanRetryReceipt               `json:"plan_retry_receipt,omitempty"`
 	PlanRetryReservation   *RetryReservation               `json:"plan_retry_reservation,omitempty"`
 	RepairRetryReservation *RetryReservation               `json:"repair_retry_reservation,omitempty"`
 	ValidationRepairKey    string                          `json:"validation_repair_key,omitempty"`

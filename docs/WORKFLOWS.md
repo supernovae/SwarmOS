@@ -248,6 +248,14 @@ Automatic retries are limited per approved task revision. The default allows two
 
 When a direct issue has exhausted its retries and the rejected reports are still current, status reports that an operator decision is needed. If revised reports are waiting for review, it points to `swarm issue review-plan <N>` instead.
 
+If a GitHub state ref times out after the planner finishes an automatic retry, Swarm checks whether the outcome reached the ref. If it cannot confirm the outcome, it prints a recovery command. Run that command from the same checkout while the original claim is active, using the retry ID Swarm printed.
+
+```bash
+swarm issue work 42 --phase plan --recover-plan-retry "$retry_id"
+```
+
+Recovery uses the retained reports and leaves the retry count unchanged. A recovered revision still goes through the configured plan review.
+
 Human rejection creates an obligation to obtain fresh authenticated human approval on the exact reports, under every direct-issue gate. With remaining allowance, work can prepare a replacement draft, then stops for `swarm issue review-plan <N> --approve`. Agent approval cannot discharge that obligation. Base or policy movement does not erase it. Both reports must exist before either human review decision can be recorded.
 
 Resume a bare rejection with effective planner feedback:
